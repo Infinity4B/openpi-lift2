@@ -13,7 +13,7 @@ HDF5 数据集应包含以下字段：
 ## 完整流程
 
 **注意**：本指南中的所有 OpenPI 核心脚本都使用 `uv run` 运行。部分脚本使用直接的 `python` 命令是因为：
-- 数据分析脚本（如 `analyze_dataset0319_left_arm.py`）：辅助工具，不是核心流程
+- 数据分析脚本（自定义的分析脚本）：辅助工具，不是核心流程
 - 测试脚本（如 `test_lift2_client.py`）：独立测试工具
 - **机器人客户端（如 `client_lift2.py`）：在远程机器人上运行，有独立的 Python 环境，不使用 uv**
 
@@ -26,12 +26,9 @@ HDF5 数据集应包含以下字段：
 
 在开始训练之前，建议先分析数据集以了解数据特征：
 
-```bash
-# 分析左臂数据（适用于单臂任务）
-.venv/bin/python analyze_dataset0319_left_arm.py
-```
+你可以使用 Jupyter Notebook 或自定义 Python 脚本分析 `observations/eef`，本仓库当前不内置固定的数据分析脚本。
 
-这个脚本会分析：
+建议至少检查以下指标：
 - 左臂和右臂的运动范围
 - 夹爪的开合状态分布
 - 各关节的均值和标准差
@@ -530,7 +527,7 @@ python client_lift2.py \
 ## 文件清单
 
 - `convert_hdf5_to_lerobot_eef.py`: 通用数据转换脚本
-- `analyze_dataset0319_left_arm.py`: 数据集分析脚本（分析左右臂运动、夹爪状态等）
+- （当前仓库没有固定的数据分析脚本，请根据需要自定义数据分析流程）
 - `src/openpi/policies/lift2_policy.py`: 通用 policy 定义
 - `src/openpi/policies/debug_policy.py`: 带调试打印的 policy 类（可选）
 - `src/openpi/training/config.py`: 包含 `pi05_lift2` 和 `pi05_lift2_lora` 配置
