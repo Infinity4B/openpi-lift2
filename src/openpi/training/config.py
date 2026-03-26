@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.lift2_policy as lift2_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -352,6 +353,52 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLift2DataConfig(DataConfigFactory):
+    """
+    Generic config for training on LIFT2 dual-arm robot datasets.
+    Supports customizable repo_id and task prompts.
+    """
+
+    default_prompt: str | None = "perform task"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Repack transform to match dataset keys to inference keys
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation.images.head": "observation.images.head",
+                        "observation.images.left_wrist": "observation.images.left_wrist",
+                        "observation.images.right_wrist": "observation.images.right_wrist",
+                        "observation.state": "observation.state",
+                        "action": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Data transforms for LIFT2
+        data_transforms = _transforms.Group(
+            inputs=[lift2_policy.Lift2Inputs(model_type=model_config.model_type)],
+            outputs=[lift2_policy.Lift2Outputs()],
+        )
+
+        # Model transforms
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("action",),
+            prompt_from_task=True,
         )
 
 
@@ -760,6 +807,217 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    #
+    # Plate2Left configs.
+    #
+    TrainConfig(
+        name="pi05_plate2left",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,  # pi05 is trained with 32-dim actions
+            action_horizon=16,
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="plate2left",
+            default_prompt="put items from plate to left",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=8,  # Reduced from 32 to save memory
+        ema_decay=None,  # Disable EMA to save memory
+    ),
+    TrainConfig(
+        name="pi05_plate2left_lora",
+        # LoRA fine-tuning for RTX 4090 (24GB VRAM)
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="plate2left",
+            default_prompt="put items from plate to left",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=4,  # Reduced to 4 for 24GB VRAM
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,  # Disable EMA for LoRA
+    ),
+    #
+    # Plate2Left EEF (delta EEF + normalized gripper) configs.
+    #
+    TrainConfig(
+        name="pi05_plate2left_eef",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,  # pi05 uses 32-dim action space (14-dim padded to 32)
+            action_horizon=16,
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="plate2left_eef",
+            default_prompt="put items from plate to left",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=8,
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_plate2left_eef_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="plate2left_eef",
+            default_prompt="put items from plate to left",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=4,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # Generic LIFT2 configs (use these for new tasks).
+    #
+    TrainConfig(
+        name="pi05_lift2",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="CHANGE_ME",  # Set via --data.repo-id
+            default_prompt="CHANGE_ME",  # Set via --data.default-prompt
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=8,
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_lift2_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="CHANGE_ME",  # Set via --data.repo-id
+            default_prompt="CHANGE_ME",  # Set via --data.default-prompt
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=4,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+     TrainConfig(
+      name="pi05_0319_pick_and_place_block_lora",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_dim=32,
+          action_horizon=16,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0319_pick_and_place_block",
+          default_prompt="Put the block on the plate.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=20_000,
+      batch_size=4,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+     TrainConfig(
+      name="pi05_0319_pick_and_place_block_30hz_lora",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=10,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0319_pick_and_place_block_30hz",
+          default_prompt="Put the block on the plate.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=16,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=10,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+        name="pi05_0319_pick_and_place_block_30hz_full",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=10,
+            paligemma_variant="gemma_2b",  # Full model, not LoRA
+            action_expert_variant="gemma_300m",  # Full model, not LoRA
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="0319_pick_and_place_block_30hz",
+            default_prompt="Put the block on the plate.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,  # Tuned for 8xA800 full fine-tuning
+        freeze_filter=None,  # No freezing for full fine-tuning
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_0319_pick_and_place_block_full",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b",  # Full model, not LoRA
+            action_expert_variant="gemma_300m",  # Full model, not LoRA
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="0319_pick_and_place_block",
+            default_prompt="Put the block on the plate.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=32,  # Increased for 8xA800
+        freeze_filter=None,  # No freezing for full fine-tuning
+        ema_decay=None,
     ),
     #
     # Fine-tuning Aloha configs.

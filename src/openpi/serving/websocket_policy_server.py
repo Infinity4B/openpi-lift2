@@ -6,10 +6,14 @@ import traceback
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
+import numpy as np
 import websockets.asyncio.server as _server
 import websockets.frames
 
 logger = logging.getLogger(__name__)
+
+# Configure numpy printing for debug output
+np.set_printoptions(linewidth=200, suppress=True, precision=4)
 
 
 class WebsocketPolicyServer:
@@ -24,11 +28,20 @@ class WebsocketPolicyServer:
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
+        debug_print: bool = False,
+        debug_interval: int = 1,
+        fix_state_mask: np.ndarray | None = None,
+        fix_state_values: np.ndarray | None = None,
     ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+        self._debug_print = debug_print
+        self._debug_interval = debug_interval
+        self._fix_state_mask = fix_state_mask
+        self._fix_state_values = fix_state_values
+        self._step_count = 0
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -57,9 +70,48 @@ class WebsocketPolicyServer:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
 
+                # Fix arm state if requested
+                if self._fix_state_mask is not None and "observation.state" in obs:
+                    state = obs["observation.state"]
+                    if isinstance(state, np.ndarray):
+                        state = state.copy()
+                        state[self._fix_state_mask] = self._fix_state_values[self._fix_state_mask]
+                        obs["observation.state"] = state
+
+                # Debug: Print observation
+                if self._debug_print and self._step_count % self._debug_interval == 0:
+                    print(f"\n{'='*80}")
+                    print(f"[DEBUG] Step {self._step_count} - MODEL INPUT")
+                    print(f"{'='*80}")
+                    for key, value in obs.items():
+                        if "image" in key.lower():
+                            continue
+                        if isinstance(value, np.ndarray):
+                            print(f"obs[{key!r}]: shape={value.shape}, dtype={value.dtype}, range=[{value.min():.4f}, {value.max():.4f}]")
+                            print(f"  values: {value}")
+                        else:
+                            print(f"obs[{key!r}]: {value}")
+
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
+
+                # Debug: Print output actions
+                if self._debug_print and self._step_count % self._debug_interval == 0:
+                    print(f"\n{'='*80}")
+                    print(f"[DEBUG] Step {self._step_count} - MODEL OUTPUT")
+                    print(f"{'='*80}")
+                    for key, value in action.items():
+                        if isinstance(value, np.ndarray):
+                            print(f"action[{key!r}]: shape={value.shape}, dtype={value.dtype}, range=[{value.min():.4f}, {value.max():.4f}]")
+                            print(f"  values: {value}")
+                        else:
+                            print(f"action[{key!r}]: {value}")
+
+                    print(f"\nInference time: {infer_time * 1000:.2f} ms")
+                    print(f"{'='*80}\n")
+
+                self._step_count += 1
 
                 action["server_timing"] = {
                     "infer_ms": infer_time * 1000,
