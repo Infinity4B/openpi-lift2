@@ -155,6 +155,8 @@ def main(
         fps: Output LeRobot dataset frame rate (default: 30)
         source_fps: Source HDF5 recording frame rate. If set higher than fps, data is
             downsampled by an integer stride during conversion.
+        skip_static_start: Whether to skip initial static frames (default: True)
+        motion_threshold: Motion threshold in meters for detecting motion start (default: 0.001)
     """
     data_path = Path(data_dir)
 
