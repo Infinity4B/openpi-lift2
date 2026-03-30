@@ -1033,7 +1033,7 @@ _CONFIGS = [
       ),
       weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
       num_train_steps=30_000,
-      batch_size=8,
+      batch_size=4,
       freeze_filter=pi0_config.Pi0Config(
           pi05=True,
           action_horizon=30,
