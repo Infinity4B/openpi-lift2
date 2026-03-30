@@ -75,12 +75,34 @@ uv run convert_hdf5_to_lerobot_eef.py \
     --fps 30
 ```
 
+如果原始数据是 **60Hz 采集**，想在转换时插值为 **120Hz**：
+
+```bash
+uv run convert_hdf5_to_lerobot_eef.py \
+    --data-dir ./dataset0319 \
+    --repo-id 0319_pick_and_place_block_120hz \
+    --task-description "Put the block on the plate." \
+    --source-fps 60 \
+    --fps 120
+```
+
 参数说明：
 - `--data-dir`: 包含 `episode_*.hdf5` 文件的目录
 - `--repo-id`: 数据集 ID，将保存到 `~/.cache/huggingface/lerobot/{repo_id}`
 - `--task-description`: 任务描述，用于语言指令
-- `--source-fps`: 原始 HDF5 数据的采集频率；高于 `--fps` 时会在转换时按整数倍降采样
+- `--source-fps`: 原始 HDF5 数据的采集频率
 - `--fps`: 输出 LeRobot 数据集的频率
+  - 当 `fps < source_fps` 时：按整数倍下采样
+  - 当 `fps > source_fps` 时：按整数倍插值上采样
+  - 当 `fps == source_fps` 时：直接转换
+- `--skip-static-start`: 是否跳过开头静止帧，默认开启
+- `--motion-threshold`: 运动检测阈值，单位为米，默认 `0.001`
+
+频率转换规则：
+- 目前只支持**整数倍**频率转换
+- 下采样要求 `source_fps % fps == 0`
+- 上采样要求 `fps % source_fps == 0`
+- 输出数据集中的 `observation.state` 和 `action` 都会与目标 `fps` 对齐
 
 转换后的数据集格式：
 - 状态：14 维绝对 EEF + 归一化夹爪 [0, 1]
@@ -94,7 +116,7 @@ uv run convert_hdf5_to_lerobot_eef.py \
 
 #### 方法 1：在 config.py 中创建任务专用配置（推荐）
 
-在 `src/openpi/training/config.py` 中添加你的任务配置（参考 `pi05_plate2left_eef_lora` 的格式）：
+在 `src/openpi/training/config.py` 中添加你的任务配置（参考 `pi05_plate2left_eef_lora` 的格式）。**不要覆盖已有 config，直接新增一个新的 `TrainConfig` 条目**，这样已有训练命令和历史实验名称不会被破坏：
 
 ```python
 TrainConfig(
@@ -147,6 +169,13 @@ uv run scripts/compute_norm_stats.py --config-name pi05_lift2_lora
 
 这个过程可能需要 10-20 分钟。完成后会在以下位置生成 norm_stats：
 `assets/pi05_mytask_lora/mytask_eef/` 或 `assets/pi05_lift2_lora/mytask_eef/`
+
+如果你同时维护多个频率版本的数据集，建议为每个频率单独保留 config，例如：
+- `pi05_0319_pick_and_place_block_lora`
+- `pi05_0319_pick_and_place_block_30hz_lora`
+- `pi05_0319_pick_and_place_block_120hz_lora`
+
+这样可以避免覆盖已有配置，并让 norm stats、checkpoint 和训练命令一一对应。
 
 ### 步骤 3：开始训练
 
