@@ -982,6 +982,52 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
+      name="pi05_0319_pick_and_place_block_120hz_lora",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=10,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0319_pick_and_place_block_120hz",
+          default_prompt="Put the block on the plate.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=4,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=10,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_0319_pnp_zlg_chunk30_30hz_lora",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0319_pnp_zlg_chunk30_30hz_lora",
+          default_prompt="Put the block on the plate.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=4,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
         name="pi05_0319_pick_and_place_block_30hz_full",
         model=pi0_config.Pi0Config(
             pi05=True,
