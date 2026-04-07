@@ -364,6 +364,7 @@ class LeRobotLift2DataConfig(DataConfigFactory):
     """
 
     default_prompt: str | None = "perform task"
+    use_quantile_norm: bool | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -391,9 +392,12 @@ class LeRobotLift2DataConfig(DataConfigFactory):
 
         # Model transforms
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+        base_config = self.create_base_config(assets_dirs, model_config)
+        if self.use_quantile_norm is not None:
+            base_config = dataclasses.replace(base_config, use_quantile_norm=self.use_quantile_norm)
 
         return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
+            base_config,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
@@ -1153,6 +1157,30 @@ _CONFIGS = [
       data=LeRobotLift2DataConfig(
           repo_id="wrench_30hz",
           default_prompt="Open the toolbox, check the items inside one by one, and find the wrench.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=100_000,
+      batch_size=16,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_wrench_chunk30_30hz_lora_wx_no_norm",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="wrench_30hz",
+          default_prompt="Open the toolbox, check the items inside one by one, and find the wrench.",
+          use_quantile_norm=False,
       ),
       weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
       num_train_steps=100_000,
