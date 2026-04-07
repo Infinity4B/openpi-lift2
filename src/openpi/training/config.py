@@ -1028,29 +1028,6 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
-      name="pi05_0319_pick_and_place_block_120hz_lora",
-      model=pi0_config.Pi0Config(
-          pi05=True,
-          action_horizon=10,
-          paligemma_variant="gemma_2b_lora",
-          action_expert_variant="gemma_300m_lora",
-      ),
-      data=LeRobotLift2DataConfig(
-          repo_id="0319_pick_and_place_block_120hz",
-          default_prompt="Put the block on the plate.",
-      ),
-      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-      num_train_steps=30_000,
-      batch_size=4,
-      freeze_filter=pi0_config.Pi0Config(
-          pi05=True,
-          action_horizon=10,
-          paligemma_variant="gemma_2b_lora",
-          action_expert_variant="gemma_300m_lora",
-      ).get_freeze_filter(),
-      ema_decay=None,
-    ) ,
-    TrainConfig(
       name="pi05_0319_pnp_zlg_chunk30_30hz_lora",
       model=pi0_config.Pi0Config(
           pi05=True,
@@ -1097,6 +1074,139 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
+      name="pi05_tube_50_chunk30_30hz_lora_wx",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="tube_50_30hz",
+          default_prompt="Transfer the test tube from the right rack to the left rack.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=16,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_tube_100_chunk30_30hz_lora_wx",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="tube_100_30hz",
+          default_prompt="Transfer the test tube from the right rack to the left rack.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=16,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_tube_blue_chunk30_30hz_lora_wx",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="tube_blue_30hz",
+          default_prompt="Transfer the test tube from the right rack to the left rack.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=16,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_wrench_chunk30_30hz_lora_wx",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="wrench_30hz",
+          default_prompt="Open the toolbox, check the items inside one by one, and find the wrench.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=100_000,
+      batch_size=16,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_0403_cube_chunk30_30hz_lora_wx",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0403_cube_30hz",
+          default_prompt="Put the block on the plate.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=16,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_0319_pnp_zlg_chunk30_30hz_full_wx",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0319_pnp_zlg_chunk30_30hz",
+          default_prompt="Put the block on the plate.",
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=30_000,
+      batch_size=32,
+      freeze_filter=None,
+      ema_decay=None,
+    ) ,
+    TrainConfig(
         name="pi05_0319_pick_and_place_block_30hz_full",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -1134,29 +1244,6 @@ _CONFIGS = [
         freeze_filter=None,  # No freezing for full fine-tuning
         ema_decay=None,
     ),
-    TrainConfig(
-      name="pi05_0319_pnp_zlg_chunk30_30hz_lora",
-      model=pi0_config.Pi0Config(
-          pi05=True,
-          action_horizon=30,
-          paligemma_variant="gemma_2b_lora",
-          action_expert_variant="gemma_300m_lora",
-      ),
-      data=LeRobotLift2DataConfig(
-          repo_id="0319_pnp_zlg_chunk30_30hz_lora",
-          default_prompt="Put the block on the plate.",
-      ),
-      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-      num_train_steps=30_000,
-      batch_size=4,
-      freeze_filter=pi0_config.Pi0Config(
-          pi05=True,
-          action_horizon=30,
-          paligemma_variant="gemma_2b_lora",
-          action_expert_variant="gemma_300m_lora",
-      ).get_freeze_filter(),
-      ema_decay=None,
-    ) ,
     #
     # Fine-tuning Aloha configs.
     #
