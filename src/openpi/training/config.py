@@ -364,6 +364,7 @@ class LeRobotLift2DataConfig(DataConfigFactory):
     """
 
     default_prompt: str | None = "perform task"
+    use_quantile_norm: bool | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -391,9 +392,12 @@ class LeRobotLift2DataConfig(DataConfigFactory):
 
         # Model transforms
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+        base_config = self.create_base_config(assets_dirs, model_config)
+        if self.use_quantile_norm is not None:
+            base_config = dataclasses.replace(base_config, use_quantile_norm=self.use_quantile_norm)
 
         return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
+            base_config,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
