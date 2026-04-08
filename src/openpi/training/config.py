@@ -1170,7 +1170,7 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
-      name="pi05_wrench_chunk30_30hz_lora_wx_no_norm",
+      name="pi05_wrench_chunk30_30hz_bs32_nonorm_lora",
       model=pi0_config.Pi0Config(
           pi05=True,
           action_horizon=30,
@@ -1178,13 +1178,38 @@ _CONFIGS = [
           action_expert_variant="gemma_300m_lora",
       ),
       data=LeRobotLift2DataConfig(
-          repo_id="wrench_30hz",
+          repo_id="wrench_30hz_nonorm",
+          default_prompt="Open the toolbox, check the items inside one by one, and find the wrench.",
+          use_quantile_norm=False,
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=100_000,
+      batch_size=32,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_wrench_chunk30_30hz_bs16_ga2_nonorm_lora",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="wrench_30hz_nonorm",
           default_prompt="Open the toolbox, check the items inside one by one, and find the wrench.",
           use_quantile_norm=False,
       ),
       weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
       num_train_steps=100_000,
       batch_size=16,
+      optimizer=_optimizer.AdamW(accumulation_steps=2),
       freeze_filter=pi0_config.Pi0Config(
           pi05=True,
           action_horizon=30,
