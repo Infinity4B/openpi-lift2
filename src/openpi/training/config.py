@@ -1218,6 +1218,30 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
+      name="pi05_tube_blue_100_chunk30_30hz_bs32_nonorm_lora",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="tube_blue_100_30hz_nonorm",
+          default_prompt="Transfer the test tube from the right rack to the left rack.",
+          use_quantile_norm=False,
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      num_train_steps=100_000,
+      batch_size=32,
+      freeze_filter=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ).get_freeze_filter(),
+      ema_decay=None,
+    ) ,
+    TrainConfig(
       name="pi05_wrench_200_chunk30_30hz_bs32_nonorm_lora",
       model=pi0_config.Pi0Config(
           pi05=True,
