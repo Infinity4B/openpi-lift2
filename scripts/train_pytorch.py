@@ -146,6 +146,28 @@ def get_model_parameters(model):
     )
 
 
+def cleanup_old_checkpoints(checkpoint_dir, current_step: int, keep_period: int | None):
+    """Clean up old checkpoints, keeping only the latest one and those matching keep_period.
+
+    Mirrors the behavior of orbax CheckpointManager with max_to_keep=1 and keep_period.
+    """
+    current_step = int(current_step)
+    checkpoint_steps = sorted(
+        int(d.name)
+        for d in checkpoint_dir.iterdir()
+        if d.is_dir() and d.name.isdigit() and not d.name.startswith("tmp_")
+    )
+
+    for step in checkpoint_steps:
+        if step == current_step:
+            continue
+        if keep_period is not None and step % keep_period == 0:
+            continue
+        ckpt_path = checkpoint_dir / f"{step}"
+        shutil.rmtree(ckpt_path)
+        logging.info(f"Removed old checkpoint at step {step}")
+
+
 def save_checkpoint(model, optimizer, global_step, config, is_main, data_config):
     """Save a checkpoint with model state, optimizer state, and metadata."""
     if not is_main:
@@ -188,6 +210,9 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_config)
         tmp_ckpt_dir.rename(final_ckpt_dir)
 
         logging.info(f"Saved checkpoint at step {global_step} -> {final_ckpt_dir}")
+
+        # Clean up old checkpoints (keep only latest + keep_period checkpoints)
+        cleanup_old_checkpoints(config.checkpoint_dir, global_step, config.keep_period)
 
         # Log checkpoint to wandb
         if config.wandb_enabled:
