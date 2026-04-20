@@ -45,6 +45,7 @@ import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
+import openpi.training.swanlab_logger as _swanlab
 
 
 def init_logging():
@@ -89,6 +90,16 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
             project=config.project_name,
         )
         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
+
+    # Initialize SwanLab as additional logger (enabled by env vars)
+    swanlab = _swanlab.get_swanlab_logger()
+    swanlab.init(
+        name=config.exp_name,
+        project=config.project_name,
+        config=dataclasses.asdict(config),
+        ckpt_dir=ckpt_dir,
+        resuming=resuming,
+    )
 
 
 def setup_ddp():
@@ -217,6 +228,7 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_config)
         # Log checkpoint to wandb
         if config.wandb_enabled:
             wandb.log({"checkpoint_step": global_step}, step=global_step)
+            _swanlab.get_swanlab_logger().log({"checkpoint_step": global_step}, step=global_step)
 
 
 def load_checkpoint(model, optimizer, checkpoint_dir, device):
@@ -405,6 +417,10 @@ def train_loop(config: _config.TrainConfig):
             images_to_log.append(wandb.Image(img_concatenated))
 
         wandb.log({"camera_views": images_to_log}, step=0)
+        _swanlab.get_swanlab_logger().log_images("camera_views", [
+            torch.cat([img[i].permute(1, 2, 0) for img in sample_batch["image"].values()], axis=1).cpu().numpy()
+            for i in range(min(5, batch_size))
+        ], step=0)
 
         # Clear sample batch from memory aggressively
         del sample_batch, observation, actions, images_to_log, img_concatenated
@@ -621,6 +637,7 @@ def train_loop(config: _config.TrainConfig):
                     if avg_grad_norm is not None:
                         log_payload["grad_norm"] = avg_grad_norm
                     wandb.log(log_payload, step=global_step)
+                    _swanlab.get_swanlab_logger().log(log_payload, step=global_step)
 
                 start_time = time.time()
                 infos = []  # Reset stats collection
@@ -643,6 +660,7 @@ def train_loop(config: _config.TrainConfig):
     # Finish wandb run
     if is_main and config.wandb_enabled:
         wandb.finish()
+        _swanlab.get_swanlab_logger().finish()
 
     cleanup_ddp()
 

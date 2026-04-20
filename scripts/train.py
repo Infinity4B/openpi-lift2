@@ -24,6 +24,7 @@ import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
+import openpi.training.swanlab_logger as _swanlab
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
@@ -68,6 +69,16 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
+
+    # Initialize SwanLab as additional logger (enabled by env vars)
+    swanlab = _swanlab.get_swanlab_logger()
+    swanlab.init(
+        name=config.exp_name,
+        project=config.project_name,
+        config=dataclasses.asdict(config),
+        ckpt_dir=ckpt_dir,
+        resuming=resuming,
+    )
 
 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
@@ -232,6 +243,11 @@ def main(config: _config.TrainConfig):
         for i in range(min(5, len(next(iter(batch[0].images.values())))))
     ]
     wandb.log({"camera_views": images_to_log}, step=0)
+    swanlab = _swanlab.get_swanlab_logger()
+    swanlab.log_images("camera_views", [
+        np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1)
+        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+    ], step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
@@ -266,6 +282,7 @@ def main(config: _config.TrainConfig):
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
+            _swanlab.get_swanlab_logger().log(reduced_info, step=step)
             infos = []
         batch = next(data_iter)
 
@@ -274,6 +291,7 @@ def main(config: _config.TrainConfig):
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
+    _swanlab.get_swanlab_logger().finish()
 
 
 if __name__ == "__main__":
