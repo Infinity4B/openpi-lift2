@@ -1332,7 +1332,7 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
-      name="pi05_power_strip_200_chunk30_30hz_bs32_nonorm_full_pytorch",
+      name="pi05_power_strip_refined_100_chunk30_30hz_bs32_nonorm_full_pytorch",
       model=pi0_config.Pi0Config(
           pi05=True,
           action_horizon=30,
@@ -1351,7 +1351,7 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
-      name="pi05_better_power_strip_200_chunk30_30hz_bs32_nonorm_full_pytorch",
+      name="pi05_better_power_strip_refined_100_chunk30_30hz_bs32_nonorm_full_pytorch",
       model=pi0_config.Pi0Config(
           pi05=True,
           action_horizon=30,
