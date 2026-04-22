@@ -81,6 +81,9 @@ cd /path/to/openpi/openpi-on-LIFT2
 # 基本用法：用任务简写自动填充默认描述
 bash launch.sh --host <策略服务器IP> --task tube
 
+# 启用 3 路相机视频录制
+bash launch.sh --host <策略服务器IP> --task tube --record_video
+
 # 直接运行客户端
 python deploy/client_lift2.py \
     --host 192.168.1.100 \
@@ -146,6 +149,7 @@ python deploy/client_lift2.py \
 ### 日志
 - `--verbose`: 启用详细日志
 - `--log_latency`: 记录每次推理的延迟
+- `--record_video`: 录制 3 路 D405 相机视频到 `./video/{task}/{seq}/`
 
 ## 使用示例
 
@@ -214,15 +218,15 @@ python deploy/client_lift2.py \
 
 - **low_threshold**（默认）：阈值3.5
   - > 3.5 → 4.9（张开）
-  - ≤ 3.5 → 1.0（闭合）
+  - ≤ 3.5 → 0.5（闭合）
 
 - **hard**：阈值4.25
   - > 4.25 → 4.9（张开）
-  - ≤ 4.25 → 1.0（闭合）
+  - ≤ 4.25 → 0.5（闭合）
 
 - **soft**：软二值化，过渡区间0.5
   - > 4.0 → 4.9（张开）
-  - < 3.0 → 1.0（闭合）
+  - < 3.0 → 0.5（闭合）
   - 3.0-4.0 → 线性插值
 
 - **raw**：限制在[0.5, 5.0]范围内

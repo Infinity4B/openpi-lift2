@@ -9,10 +9,10 @@ import numpy as np
 import time
 import argparse
 import collections
+import os
 
 import rospy
 import sys
-import os
 
 # Add parent directory to path to find deploy.utils
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +47,21 @@ def resolve_language_instruction(args):
     if args.task:
         return PRESET_TASK_INSTRUCTIONS[args.task]
     return DEFAULT_LANGUAGE_INSTRUCTION
+
+
+def resolve_video_output_dir(args):
+    task_name = args.task if args.task else 'custom'
+    video_root = os.path.join(parent_dir, 'video', task_name)
+    os.makedirs(video_root, exist_ok=True)
+
+    next_seq = 1
+    for entry in os.listdir(video_root):
+        if entry.isdigit():
+            next_seq = max(next_seq, int(entry) + 1)
+
+    output_dir = os.path.join(video_root, str(next_seq))
+    os.makedirs(output_dir, exist_ok=False)
+    return output_dir
 
 
 class OpenPIClientModel:
@@ -239,10 +254,10 @@ class OpenPIClientModel:
 
         if args.binarize_gripper:
             # Binarize and map to robot gripper range [0, 5]
-            # Avoid extreme values (1.0, 4.9) for safety, matching X-VLA convention
+            # Avoid extreme values (0.5, 4.9) for safety, matching X-VLA convention
             # Threshold: < 0.6 = closed, >= 0.6 = open
             GRIPPER_THRESHOLD = 0.6  # Normalized threshold
-            GRIPPER_CLOSED = 1.0
+            GRIPPER_CLOSED = 0.5
             GRIPPER_OPEN = 4.9
             action_predict[6] = GRIPPER_OPEN if left_gripper_norm >= GRIPPER_THRESHOLD else GRIPPER_CLOSED
             action_predict[13] = GRIPPER_OPEN if right_gripper_norm >= GRIPPER_THRESHOLD else GRIPPER_CLOSED
@@ -538,6 +553,8 @@ def get_arguments():
     # Debug mode
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Debug mode: press Enter to execute each action step')
+    parser.add_argument('--record_video', action='store_true', default=False,
+                        help='Record three camera videos to ./video/{task}/{seq}')
 
     # Gripper control
     parser.add_argument('--binarize_gripper', action='store_true', default=True,
@@ -580,6 +597,11 @@ def main():
     if args.task:
         rospy.loginfo(f"Task preset: {args.task}")
     rospy.loginfo(f"Language instruction: {args.language_instruction}")
+    if args.record_video:
+        args.video_output_dir = resolve_video_output_dir(args)
+        rospy.loginfo(f"Video recording: Enabled -> {args.video_output_dir}")
+    else:
+        args.video_output_dir = None
     if args.debug:
         rospy.loginfo("** DEBUG MODE: Press Enter to execute each step **")
     rospy.loginfo("="*50)
@@ -594,7 +616,10 @@ def main():
     }
 
     # Start inference
-    model_inference(args, config, ros_operator)
+    try:
+        model_inference(args, config, ros_operator)
+    finally:
+        ros_operator.close_video_writers()
 
 
 if __name__ == '__main__':
