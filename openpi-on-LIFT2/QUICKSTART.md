@@ -61,11 +61,14 @@ roslaunch realsense2_camera rs_multiple_devices.launch
 ```bash
 cd /path/to/openpi/openpi-on-LIFT2
 
-# 将 <服务器IP> 替换为你的策略服务器IP
-./launch.sh --host <服务器IP> --verbose
+# 默认 profile：30Hz
+./launch.sh --task tube --verbose
 
-# 示例：
-./launch.sh --host 192.168.1.100 --verbose
+# 上采样 profile：60Hz
+./launch.sh --profile upsample --task tube --verbose
+
+# 覆盖 profile 中的 host
+./launch.sh --profile upsample --host <服务器IP> --task tube --verbose
 ```
 
 ## 无机器人测试

@@ -10,6 +10,8 @@ import time
 import argparse
 import collections
 import os
+import socket
+from pathlib import Path
 
 import rospy
 import sys
@@ -30,6 +32,29 @@ task_config = {
 }
 
 DEFAULT_LANGUAGE_INSTRUCTION = 'perform task'
+DEFAULT_MAX_PUBLISH_STEP = 1000
+DEFAULT_PROFILE_NAME = 'default'
+DEFAULT_LAUNCH_CONFIG = Path(parent_dir) / 'launch_profiles.yaml'
+DEFAULT_ROS_SETUP = Path.home() / 'Desktop' / 'LIFT' / 'R5' / 'ROS' / 'R5_ws' / 'devel' / 'setup.bash'
+LEGACY_RUNTIME_DEFAULTS = {
+    'host': '192.168.101.101',
+    'port': 7777,
+    'publish_rate': 30,
+    'execute_horizon': 30,
+    'action_chunk_size': 30,
+    'source_hz': 30,
+    'target_hz': 30,
+    'max_publish_step': DEFAULT_MAX_PUBLISH_STEP,
+}
+PROFILE_REQUIRED_KEYS = (
+    'host',
+    'port',
+    'publish_rate',
+    'execute_horizon',
+    'action_chunk_size',
+    'source_hz',
+    'target_hz',
+)
 PRESET_TASK_INSTRUCTIONS = {
     'tube': 'Transfer the test tube from the right rack to the left rack.',
     'towel': 'Flatten the towel.',
@@ -47,6 +72,106 @@ def resolve_language_instruction(args):
     if args.task:
         return PRESET_TASK_INSTRUCTIONS[args.task]
     return DEFAULT_LANGUAGE_INSTRUCTION
+
+
+def load_launch_profile(config_path, profile_name):
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError(f"PyYAML is required to read {config_path}: {exc}") from exc
+
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    profiles = data.get('profiles')
+    if not isinstance(profiles, dict):
+        raise ValueError(f"Invalid config: missing 'profiles' mapping in {config_path}")
+
+    profile = profiles.get(profile_name)
+    if not isinstance(profile, dict):
+        available = ', '.join(sorted(profiles)) or '<none>'
+        raise ValueError(f"Unknown profile '{profile_name}'. Available profiles: {available}")
+
+    missing = [key for key in PROFILE_REQUIRED_KEYS if key not in profile]
+    if missing:
+        raise ValueError(
+            f"Profile '{profile_name}' is missing required keys: {', '.join(missing)}"
+        )
+
+    return dict(profile)
+
+
+def apply_launch_profile(args):
+    if not getattr(args, 'profile', None):
+        return
+
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    profile = load_launch_profile(config_path, args.profile)
+    args.profile_config_path = str(config_path)
+
+    for key in PROFILE_REQUIRED_KEYS:
+        if getattr(args, key, None) is None:
+            value = profile[key]
+            caster = int if key != 'host' else str
+            setattr(args, key, caster(value))
+
+    if args.max_publish_step is None:
+        args.max_publish_step = DEFAULT_MAX_PUBLISH_STEP
+
+
+def finalize_runtime_args(args):
+    for key, value in LEGACY_RUNTIME_DEFAULTS.items():
+        if getattr(args, key, None) is None:
+            setattr(args, key, value)
+
+    args.enable_upsample = args.enable_upsample or args.target_hz != args.source_hz
+    args.language_instruction = resolve_language_instruction(args)
+    return args
+
+
+def format_launcher_summary(args):
+    lines = [
+        '=' * 50,
+        'OpenPI LIFT2 Client Launcher',
+        '=' * 50,
+    ]
+
+    if getattr(args, 'profile', None):
+        lines.append(f"Config File: {getattr(args, 'profile_config_path', args.config)}")
+        lines.append(f"Profile: {args.profile}")
+
+    lines.extend([
+        f"Policy Server: {args.host}:{args.port}",
+        f"Control Rate: {args.publish_rate} Hz",
+        f"Execute Horizon: {args.execute_horizon} frames",
+        f"Action Chunk Size: {args.action_chunk_size} frames",
+        f"Max Steps: {'Infinite' if args.max_publish_step <= 0 else args.max_publish_step}",
+        (
+            'Action Upsampling: '
+            + ('Enabled' if args.enable_upsample else 'Disabled')
+            + f" ({args.source_hz}Hz -> {args.target_hz}Hz)"
+        ),
+    ])
+
+    if args.task:
+        lines.append(f"Task Preset: {args.task}")
+    lines.append(f"Language Instruction: {args.language_instruction}")
+
+    if args.record_video:
+        lines.append(f"Video Recording: ON (save to ./video/{args.task or 'custom'}/<next_seq>)")
+    if args.debug:
+        lines.append('Debug Mode: ON (press Enter each step)')
+
+    lines.append('=' * 50)
+    return '\n'.join(lines)
+
+
+def check_server_connectivity(host, port, timeout_seconds=2.0):
+    with socket.create_connection((host, port), timeout=timeout_seconds):
+        return
 
 
 def resolve_video_output_dir(args):
@@ -67,8 +192,8 @@ def resolve_video_output_dir(args):
 class OpenPIClientModel:
     """OpenPI Inference Client for EEF Delta Control"""
 
-    def __init__(self, host, port, execute_horizon=10,
-                 enable_upsample=False, action_chunk_size=10, target_hz=60, source_hz=30):
+    def __init__(self, host, port, execute_horizon=30,
+                 enable_upsample=False, action_chunk_size=30, target_hz=30, source_hz=30):
         """
         Args:
             host: Policy server host
@@ -478,10 +603,22 @@ def get_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='OpenPI LIFT2 Client - EEF Delta Control')
 
+    # Launcher/profile options
+    parser.add_argument('--profile', type=str, default=None,
+                        help='Launch profile name from launch_profiles.yaml')
+    parser.add_argument('--config', type=str, default=str(DEFAULT_LAUNCH_CONFIG),
+                        help=f'YAML config file path (default: {DEFAULT_LAUNCH_CONFIG})')
+    parser.add_argument('--check', action='store_true', default=False,
+                        help='Only validate launch config and connectivity, then exit')
+    parser.add_argument('--skip_connectivity_check', action='store_true', default=False,
+                        help='Skip policy server connectivity check before startup')
+    parser.add_argument('--ros_setup', type=str, default=None,
+                        help=f'ROS setup.bash path hint (default: {DEFAULT_ROS_SETUP})')
+
     # Policy server
-    parser.add_argument('--host', type=str, default="192.168.101.101",
+    parser.add_argument('--host', type=str, default=None,
                         help='Policy server host')
-    parser.add_argument('--port', type=int, default=7777,
+    parser.add_argument('--port', type=int, default=None,
                         help='Policy server port')
 
     # Task configuration
@@ -489,24 +626,26 @@ def get_arguments():
                         help='Preset task shortcut that auto-fills the language instruction')
     parser.add_argument('--language_instruction', type=str, default=None,
                         help='Language instruction (overrides --task)')
-    parser.add_argument('--max_publish_step', type=int, default=1000,
+    parser.add_argument('--max_publish_step', type=int, default=None,
                         help='Maximum execution steps (0 or negative for infinite mode)')
+    parser.add_argument('--infinite', action='store_true', default=False,
+                        help='Run without max step limit')
 
     # Control parameters
-    parser.add_argument('--publish_rate', type=int, default=30,
+    parser.add_argument('--publish_rate', type=int, default=None,
                         help='Control frequency (Hz)')
-    parser.add_argument('--execute_horizon', type=int, default=10,
-                        help='Frames to execute per inference')
+    parser.add_argument('--execute_horizon', type=int, default=None,
+                        help='Frames to execute per inference (default fallback: 30)')
 
-    # Action upsampling (30Hz -> 60Hz)
+    # Action upsampling
     parser.add_argument('--enable_upsample', action='store_true', default=False,
-                        help='Enable action upsampling (e.g., 30Hz -> 60Hz)')
-    parser.add_argument('--action_chunk_size', type=int, default=10,
-                        help='Number of frames to use from prediction when upsampling (default: 10)')
-    parser.add_argument('--target_hz', type=int, default=60,
-                        help='Target control frequency for upsampling (default: 60)')
-    parser.add_argument('--source_hz', type=int, default=30,
-                        help='Source prediction frequency for upsampling (default: 30)')
+                        help='Enable action upsampling')
+    parser.add_argument('--action_chunk_size', type=int, default=None,
+                        help='Number of frames to use from prediction when upsampling (default fallback: 30)')
+    parser.add_argument('--target_hz', type=int, default=None,
+                        help='Target control frequency for upsampling (default fallback: 30)')
+    parser.add_argument('--source_hz', type=int, default=None,
+                        help='Source prediction frequency for upsampling (default fallback: 30)')
 
     # Initialization
     parser.add_argument('--auto_init', action='store_true', default=True,
@@ -569,13 +708,42 @@ def get_arguments():
                         help='Log single-inference latency (ms) each time')
 
     args = parser.parse_args()
-    args.language_instruction = resolve_language_instruction(args)
-    return args
+    if args.infinite:
+        args.max_publish_step = 0
+    apply_launch_profile(args)
+    return finalize_runtime_args(args)
 
 
 def main():
     """Main function"""
     args = get_arguments()
+
+    if getattr(args, 'profile', None):
+        print(format_launcher_summary(args))
+        print()
+
+        if not args.skip_connectivity_check:
+            print('Checking policy server connectivity...')
+            try:
+                check_server_connectivity(args.host, args.port)
+            except OSError:
+                print(f'✗ Cannot reach policy server at {args.host}:{args.port}')
+                print('  Please ensure the policy server is running:')
+                print('  uv run scripts/serve_policy.py policy:checkpoint --policy.config=pi05_lift2_lora --policy.dir=<checkpoint_dir>')
+                raise SystemExit(1)
+            else:
+                print('✓ Policy server is reachable')
+
+        if args.check:
+            return
+
+        ros_setup = Path(args.ros_setup).expanduser() if args.ros_setup else DEFAULT_ROS_SETUP
+        if not ros_setup.is_file():
+            print(f'Warning: ROS setup file not found: {ros_setup}')
+            print('Please source the correct ROS environment before running this client.')
+        print()
+        print('Starting OpenPI client...')
+        print()
 
     rospy.init_node('openpi_lift2_client', anonymous=True)
 

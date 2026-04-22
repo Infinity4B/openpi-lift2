@@ -1,0 +1,18 @@
+profiles:
+  default:
+    host: 192.168.101.101
+    port: 7777
+    publish_rate: 30
+    execute_horizon: 30
+    action_chunk_size: 30
+    source_hz: 30
+    target_hz: 30
+
+  upsample:
+    host: 192.168.101.101
+    port: 7777
+    publish_rate: 60
+    execute_horizon: 59
+    action_chunk_size: 30
+    source_hz: 30
+    target_hz: 60

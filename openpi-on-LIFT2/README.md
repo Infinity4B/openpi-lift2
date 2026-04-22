@@ -78,11 +78,17 @@ roslaunch realsense2_camera rs_multiple_devices.launch
 ```bash
 cd /path/to/openpi/openpi-on-LIFT2
 
-# 基本用法：用任务简写自动填充默认描述
-bash launch.sh --host <策略服务器IP> --task tube
+# 默认 profile：30Hz，不上采样
+bash launch.sh --task tube
+
+# 上采样 profile：60Hz，30Hz -> 60Hz
+bash launch.sh --profile upsample --task tube
+
+# 覆盖 profile 中的 host
+bash launch.sh --profile upsample --host <策略服务器IP> --task tube
 
 # 启用 3 路相机视频录制
-bash launch.sh --host <策略服务器IP> --task tube --record_video
+bash launch.sh --profile upsample --task tube --record_video
 
 # 直接运行客户端
 python deploy/client_lift2.py \
@@ -121,6 +127,10 @@ python deploy/client_lift2.py \
 - `stack`: `Stack the building blocks one by one with the larger ones at the bottom.`
 
 ### 控制参数
+- `launch.sh` 通过 `launch_profiles.yaml` 管理启动参数，支持 `--profile default` 和 `--profile upsample`
+- `default`: `host=192.168.101.101`、`port=7777`、`publish_rate=30`、`execute_horizon=30`、`action_chunk_size=30`、`source_hz=30`、`target_hz=30`
+- `upsample`: `host=192.168.101.101`、`port=7777`、`publish_rate=60`、`execute_horizon=59`、`action_chunk_size=30`、`source_hz=30`、`target_hz=60`
+- `--host` / `--port`: 可覆盖 profile 中的服务器地址
 - `--publish_rate`: 控制频率（Hz）（默认：30）
 - `--execute_horizon`: 每次推理执行的帧数（默认：10）
 - `--gripper_mode`: 夹爪处理模式
@@ -160,9 +170,14 @@ uv run scripts/serve_policy.py policy:checkpoint \
     --policy.config=pi05_lift2_lora \
     --policy.dir=checkpoints/pi05_lift2_lora/<exp_name>/<step>
 
-# 在机器人上
+# 在机器人上：默认 30Hz profile
 bash launch.sh \
-    --host 192.168.1.100 \
+    --task tube \
+    --verbose
+
+# 在机器人上：60Hz 上采样 profile
+bash launch.sh \
+    --profile upsample \
     --task tube \
     --verbose
 ```

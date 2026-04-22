@@ -273,37 +273,43 @@ python test_lift2_client.py \
 ```bash
 cd openpi-on-LIFT2
 
-# 基本启动（默认启用 60Hz 上采样）
-bash launch.sh --host <policy_server_ip> --task tube
+# 默认 profile：30Hz，不上采样
+bash launch.sh --task tube
 
-# 禁用上采样（使用 30Hz 控制）
-bash launch.sh --host <policy_server_ip> --task tube --no_upsample
+# 上采样 profile：60Hz，30Hz -> 60Hz
+bash launch.sh --profile upsample --task tube
+
+# 覆盖 profile 中的 host
+bash launch.sh --profile upsample --host <policy_server_ip> --task tube
 
 # 启用单步调试模式（每步按 Enter 执行）
-bash launch.sh --host <policy_server_ip> --task tube --debug
+bash launch.sh --profile upsample --task tube --debug
 
 # 启用详细日志
-bash launch.sh --host <policy_server_ip> --task tube --verbose
+bash launch.sh --profile upsample --task tube --verbose
 
 # 如果需要，也可以直接覆盖默认描述
-bash launch.sh --host <policy_server_ip> --task tube --language_instruction "describe your task here"
+bash launch.sh --profile upsample --task tube --language_instruction "describe your task here"
 ```
 
+`launch.sh` 通过 `launch_profiles.yaml` 管理启动参数，支持的 profile：
+- `default`：`host=192.168.101.101`、`port=7777`、`publish_rate=30`、`execute_horizon=30`、`action_chunk_size=30`、`source_hz=30`、`target_hz=30`
+- `upsample`：`host=192.168.101.101`、`port=7777`、`publish_rate=60`、`execute_horizon=59`、`action_chunk_size=30`、`source_hz=30`、`target_hz=60`
+
 `launch.sh` 支持的参数：
-- `--host IP`: Policy server IP 地址（默认 192.168.101.101）
-- `--port PORT`: 端口（默认 7777）
+- `--profile NAME`: 选择 YAML profile，默认 `default`
+- `--config FILE`: 指定 YAML 配置文件路径
+- `--host IP`: 覆盖 profile 中的 Policy server IP 地址
+- `--port PORT`: 覆盖 profile 中的端口
 - `--task NAME`: 任务简写，自动填充默认任务描述。支持：`tube`、`towel`、`wrench`、`power_strip`、`drum`、`dice`、`stack`
 - `--language_instruction TEXT`: 自定义任务语言指令；如果同时传入，会覆盖 `--task` 的默认描述
-- `--no_upsample`: 禁用动作上采样（默认启用 30Hz→60Hz 上采样）
-- `--action_chunk_size N`: 从预测中使用的帧数（默认 10）
 - `--verbose`: 详细日志
 - `--debug`: 单步调试模式，每步按 Enter 执行，显示动作详情
 
 **动作上采样说明**：
-- 默认启用 30Hz → 60Hz 上采样，让机器人运动更平滑
-- 模型预测 10 帧 @ 30Hz，上采样为 19 帧 @ 60Hz
-- 执行时间：19 帧 @ 60Hz = 317ms，推理余量充足
-- 如果不需要上采样，使用 `--no_upsample` 回退到 30Hz 控制
+- `default` profile 使用 30Hz 控制，不启用上采样
+- `upsample` profile 使用 30Hz → 60Hz 上采样
+- 可以通过修改 `launch_profiles.yaml` 继续扩展新的启动组合
 
 也可以直接运行 `client_lift2.py`（更多参数可用）：
 
@@ -316,7 +322,10 @@ python client_lift2.py \
     --port 7777 \
     --task tube \
     --publish_rate 30 \
-    --execute_horizon 10
+    --execute_horizon 30 \
+    --action_chunk_size 30 \
+    --target_hz 30 \
+    --source_hz 30
 
 # 启用 60Hz 上采样模式
 python client_lift2.py \
@@ -324,9 +333,9 @@ python client_lift2.py \
     --port 7777 \
     --task tube \
     --publish_rate 60 \
-    --execute_horizon 19 \
+    --execute_horizon 59 \
     --enable_upsample \
-    --action_chunk_size 10 \
+    --action_chunk_size 30 \
     --target_hz 60 \
     --source_hz 30
 ```

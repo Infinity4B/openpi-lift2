@@ -5,6 +5,9 @@ ROS Operator for OpenPI LIFT2 Client (EEF Control)
 Handles sensor data collection and end-effector pose control for ARX R5 dual-arm robot
 """
 
+import os
+
+import cv2
 import rospy
 from sensor_msgs.msg import Image
 from arm_control.msg import PosCmd
@@ -15,6 +18,12 @@ import numpy as np
 
 class RosOperator:
     """ROS Operator: Manages all ROS topic subscriptions and publications"""
+
+    CAMERA_FILE_NAMES = {
+        'head': 'camera_h.mp4',
+        'left_wrist': 'camera_l.mp4',
+        'right_wrist': 'camera_r.mp4',
+    }
 
     def __init__(self, args):
         """
@@ -42,12 +51,18 @@ class RosOperator:
         self.arm_left_cmd_publisher = None
         self.arm_right_cmd_publisher = None
 
+        self.video_writers = {}
+        self.video_enabled = bool(getattr(self.args, 'video_output_dir', None))
+
         # Initialize ROS topics
         self.init_ros()
 
     def init_ros(self):
         """Initialize ROS subscribers and publishers"""
         # Note: rospy.init_node is called in main(), not here
+
+        if self.video_enabled:
+            self.init_video_writers()
 
         # ========== Subscribe to camera topics ==========
         rospy.Subscriber(self.args.img_left_topic, Image, self.img_left_callback,
@@ -79,21 +94,65 @@ class RosOperator:
 
         rospy.loginfo("ROS Operator initialized (EEF Control)")
 
-    # ==================== Camera callbacks ====================
+    def init_video_writers(self):
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = 30.0
+        output_dir = self.args.video_output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        for camera_name, file_name in self.CAMERA_FILE_NAMES.items():
+            self.video_writers[camera_name] = None
+            rospy.loginfo(f"[Video] Ready to record {camera_name} -> {os.path.join(output_dir, file_name)}")
+
+        self.video_fourcc = fourcc
+        self.video_fps = fps
+
+    def _ensure_video_writer(self, camera_name, frame):
+        writer = self.video_writers.get(camera_name)
+        if writer is not None:
+            return writer
+
+        height, width = frame.shape[:2]
+        file_path = os.path.join(self.args.video_output_dir, self.CAMERA_FILE_NAMES[camera_name])
+        writer = cv2.VideoWriter(file_path, self.video_fourcc, self.video_fps, (width, height))
+        if not writer.isOpened():
+            raise RuntimeError(f"Failed to open video writer for {file_path}")
+
+        self.video_writers[camera_name] = writer
+        rospy.loginfo(f"[Video] Recording {camera_name}: {width}x{height} @ {self.video_fps:.1f} FPS")
+        return writer
+
+    def _record_video_frame(self, camera_name, msg):
+        if not self.video_enabled:
+            return
+
+        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        writer = self._ensure_video_writer(camera_name, frame)
+        writer.write(frame)
+
+    def close_video_writers(self):
+        for writer in self.video_writers.values():
+            if writer is not None:
+                writer.release()
+        self.video_writers.clear()
+
     def img_left_callback(self, msg):
         if len(self.img_left_deque) >= 2000:
             self.img_left_deque.popleft()
         self.img_left_deque.append(msg)
+        self._record_video_frame('left_wrist', msg)
 
     def img_right_callback(self, msg):
         if len(self.img_right_deque) >= 2000:
             self.img_right_deque.popleft()
         self.img_right_deque.append(msg)
+        self._record_video_frame('right_wrist', msg)
 
     def img_front_callback(self, msg):
         if len(self.img_front_deque) >= 2000:
             self.img_front_deque.popleft()
         self.img_front_deque.append(msg)
+        self._record_video_frame('head', msg)
 
     def img_left_depth_callback(self, msg):
         if len(self.img_left_depth_deque) >= 2000:
