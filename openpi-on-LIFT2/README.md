@@ -78,19 +78,22 @@ roslaunch realsense2_camera rs_multiple_devices.launch
 ```bash
 cd /path/to/openpi/openpi-on-LIFT2
 
-# 基本用法
-python deploy/client_lift2.py \
-    --host <策略服务器IP> \
-    --port 8000
+# 基本用法：用任务简写自动填充默认描述
+bash launch.sh --host <策略服务器IP> --task tube
 
-# 自定义设置
+# 直接运行客户端
 python deploy/client_lift2.py \
     --host 192.168.1.100 \
     --port 8000 \
-    --publish_rate 30 \
-    --execute_horizon 10 \
-    --gripper_mode low_threshold \
-    --language_instruction "把盘子里的东西放到左边" \
+    --task towel \
+    --verbose
+
+# 自定义文本会覆盖 --task 的默认描述
+python deploy/client_lift2.py \
+    --host 192.168.1.100 \
+    --port 8000 \
+    --task tube \
+    --language_instruction "Transfer the test tube carefully." \
     --verbose
 ```
 
@@ -101,8 +104,18 @@ python deploy/client_lift2.py \
 - `--port`: 策略服务器端口（默认：8000）
 
 ### 任务配置
-- `--language_instruction`: 任务描述（默认："put items from plate to left"）
+- `--task`: 任务简写，自动填充默认任务描述。支持：`tube`、`towel`、`wrench`、`power_strip`、`drum`、`dice`、`stack`
+- `--language_instruction`: 自定义任务描述；如果同时传入，会覆盖 `--task` 的默认描述
 - `--max_publish_step`: 最大执行步数（默认：1000）
+
+默认任务描述：
+- `tube`: `Transfer the test tube from the right rack to the left rack.`
+- `towel`: `Flatten the towel.`
+- `wrench`: `Open the toolbox, check the items inside one by one, and find the wrench.`
+- `power_strip`: `Move the power strip with the left arm, and press the button of the power strip with the right arm.`
+- `drum`: `Pick up two small drumsticks and hit the small drum.`
+- `dice`: `Roll the dice and move the small stand the specified number of squares based on the number rolled.`
+- `stack`: `Stack the building blocks one by one with the larger ones at the bottom.`
 
 ### 控制参数
 - `--publish_rate`: 控制频率（Hz）（默认：30）
@@ -144,8 +157,9 @@ uv run scripts/serve_policy.py policy:checkpoint \
     --policy.dir=checkpoints/pi05_lift2_lora/<exp_name>/<step>
 
 # 在机器人上
-python deploy/client_lift2.py \
+bash launch.sh \
     --host 192.168.1.100 \
+    --task tube \
     --verbose
 ```
 

@@ -29,6 +29,25 @@ task_config = {
     'camera_names': ['head', 'left_wrist', 'right_wrist']
 }
 
+DEFAULT_LANGUAGE_INSTRUCTION = 'perform task'
+PRESET_TASK_INSTRUCTIONS = {
+    'tube': 'Transfer the test tube from the right rack to the left rack.',
+    'towel': 'Flatten the towel.',
+    'wrench': 'Open the toolbox, check the items inside one by one, and find the wrench.',
+    'power_strip': 'Move the power strip with the left arm, and press the button of the power strip with the right arm.',
+    'drum': 'Pick up two small drumsticks and hit the small drum.',
+    'dice': 'Roll the dice and move the small stand the specified number of squares based on the number rolled.',
+    'stack': 'Stack the building blocks one by one with the larger ones at the bottom.',
+}
+
+
+def resolve_language_instruction(args):
+    if args.language_instruction is not None:
+        return args.language_instruction
+    if args.task:
+        return PRESET_TASK_INSTRUCTIONS[args.task]
+    return DEFAULT_LANGUAGE_INSTRUCTION
+
 
 class OpenPIClientModel:
     """OpenPI Inference Client for EEF Delta Control"""
@@ -451,9 +470,10 @@ def get_arguments():
                         help='Policy server port')
 
     # Task configuration
-    parser.add_argument('--language_instruction', type=str,
-                        default='perform task',
-                        help='Language instruction')
+    parser.add_argument('--task', type=str, choices=sorted(PRESET_TASK_INSTRUCTIONS.keys()),
+                        help='Preset task shortcut that auto-fills the language instruction')
+    parser.add_argument('--language_instruction', type=str, default=None,
+                        help='Language instruction (overrides --task)')
     parser.add_argument('--max_publish_step', type=int, default=1000,
                         help='Maximum execution steps (0 or negative for infinite mode)')
 
@@ -532,6 +552,7 @@ def get_arguments():
                         help='Log single-inference latency (ms) each time')
 
     args = parser.parse_args()
+    args.language_instruction = resolve_language_instruction(args)
     return args
 
 
@@ -556,6 +577,8 @@ def main():
             rospy.loginfo(f"  Left target: {args.left_init_pose}")
         if args.right_init_pose:
             rospy.loginfo(f"  Right target: {args.right_init_pose}")
+    if args.task:
+        rospy.loginfo(f"Task preset: {args.task}")
     rospy.loginfo(f"Language instruction: {args.language_instruction}")
     if args.debug:
         rospy.loginfo("** DEBUG MODE: Press Enter to execute each step **")

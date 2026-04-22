@@ -274,22 +274,26 @@ python test_lift2_client.py \
 cd openpi-on-LIFT2
 
 # 基本启动（默认启用 60Hz 上采样）
-bash launch.sh --host <policy_server_ip> --language_instruction "describe your task here"
+bash launch.sh --host <policy_server_ip> --task tube
 
 # 禁用上采样（使用 30Hz 控制）
-bash launch.sh --host <policy_server_ip> --language_instruction "describe your task here" --no_upsample
+bash launch.sh --host <policy_server_ip> --task tube --no_upsample
 
 # 启用单步调试模式（每步按 Enter 执行）
-bash launch.sh --host <policy_server_ip> --language_instruction "describe your task here" --debug
+bash launch.sh --host <policy_server_ip> --task tube --debug
 
 # 启用详细日志
-bash launch.sh --host <policy_server_ip> --language_instruction "describe your task here" --verbose
+bash launch.sh --host <policy_server_ip> --task tube --verbose
+
+# 如果需要，也可以直接覆盖默认描述
+bash launch.sh --host <policy_server_ip> --task tube --language_instruction "describe your task here"
 ```
 
 `launch.sh` 支持的参数：
 - `--host IP`: Policy server IP 地址（默认 192.168.101.101）
 - `--port PORT`: 端口（默认 7777）
-- `--language_instruction TEXT`: 任务语言指令
+- `--task NAME`: 任务简写，自动填充默认任务描述。支持：`tube`、`towel`、`wrench`、`power_strip`、`drum`、`dice`、`stack`
+- `--language_instruction TEXT`: 自定义任务语言指令；如果同时传入，会覆盖 `--task` 的默认描述
 - `--no_upsample`: 禁用动作上采样（默认启用 30Hz→60Hz 上采样）
 - `--action_chunk_size N`: 从预测中使用的帧数（默认 10）
 - `--verbose`: 详细日志
@@ -310,7 +314,7 @@ cd openpi-on-LIFT2/deploy
 python client_lift2.py \
     --host <policy_server_ip> \
     --port 7777 \
-    --language_instruction "describe your task here" \
+    --task tube \
     --publish_rate 30 \
     --execute_horizon 10
 
@@ -318,7 +322,7 @@ python client_lift2.py \
 python client_lift2.py \
     --host <policy_server_ip> \
     --port 7777 \
-    --language_instruction "describe your task here" \
+    --task tube \
     --publish_rate 60 \
     --execute_horizon 19 \
     --enable_upsample \
@@ -433,7 +437,7 @@ for step in range(num_steps):
 ```bash
 python client_lift2.py \
     --host <policy_server_ip> \
-    --language_instruction "describe your task here" \
+    --task tube \
     --debug
 ```
 
@@ -550,7 +554,7 @@ uv run scripts/serve_policy.py policy:checkpoint \
 # 5. 部署
 python client_lift2.py \
     --host localhost \
-    --language_instruction "put items from plate to left"
+    --task tube
 ```
 
 ## 文件清单
