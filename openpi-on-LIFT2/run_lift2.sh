@@ -16,11 +16,11 @@ gnome-terminal --title="CAN5" -- bash -c "cd '$SCRIPT_DIR'; cd ARX_CAN/arx_can &
 sleep 1
 
 # Terminal 4: Start chassis controller
-gnome-terminal --title="LIFT Body" -- bash -c "source /opt/ros/noetic/setup.bash 2>/dev/null || source /opt/ros/melodic/setup.bash 2>/dev/null; cd '$SCRIPT_DIR/body' && source devel/setup.bash && roslaunch arx_lift_controller lift.launch; exec bash"
+gnome-terminal --title="LIFT Body" -- bash -c "cd '$SCRIPT_DIR/body' && source devel/setup.bash && roslaunch /home/arx/Desktop/openpi-on-LIFT2/body/src/ARX_LIFT_ros/arx_lift_controller/launch/lift.launch; exec bash"
 sleep 1
 
 # Terminal 5: Start dual-arm controller
-gnome-terminal --title="R5 Arms" -- bash -c "source /opt/ros/noetic/setup.bash 2>/dev/null || source /opt/ros/melodic/setup.bash 2>/dev/null; cd '$SCRIPT_DIR/R5_ws' && source devel/setup.bash && roslaunch arx_r5_controller open_double_arm_xvla.launch; exec bash"
+gnome-terminal --title="R5 Arms" -- bash -c "cd '$SCRIPT_DIR/R5_ws' && source devel/setup.bash && roslaunch /home/arx/Desktop/openpi-on-LIFT2/R5_ws/src/arx_r5_ros/arx_r5_controller/launch/open_double_arm_xvla.launch; exec bash"
 sleep 2
 
 # Terminal 6: Start cameras
