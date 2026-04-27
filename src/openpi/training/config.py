@@ -1408,6 +1408,44 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
+      name="pi05_better_tube_chunk30_30hz_bs32_nonorm_full_pytorch",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0403_cube_30hz_nonorm",
+          default_prompt="Put the cube on the plate.",
+          use_quantile_norm=False,
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      pytorch_weight_path="./checkpoints/pi05_better",
+      num_train_steps=50_000,
+      batch_size=32,
+      ema_decay=None,
+    ) ,
+    TrainConfig(
+      name="pi05_tube_chunk30_30hz_bs32_nonorm_full_pytorch",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="0403_cube_30hz_nonorm",
+          default_prompt="Put the cube on the plate.",
+          use_quantile_norm=False,
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      pytorch_weight_path="./checkpoints/pi05_pytorch",
+      num_train_steps=50_000,
+      batch_size=32,
+      ema_decay=None,
+    ) ,
+    TrainConfig(
       name="pi05_tube_blue_100_chunk30_30hz_bs32_nonorm_lora",
       model=pi0_config.Pi0Config(
           pi05=True,
