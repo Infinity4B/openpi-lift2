@@ -285,8 +285,8 @@ bash launch.sh --profile upsample --host <policy_server_ip> --task tube
 # 启用单步调试模式（每步按 Enter 执行）
 bash launch.sh --profile upsample --task tube --debug
 
-# 启用详细日志
-bash launch.sh --profile upsample --task tube --verbose
+# 启用 3 路相机视频录制（结束后只确认是否保留；确认后静默在后台转视频；Ctrl+C 中断后也会继续询问是否保留）
+bash launch.sh --profile upsample --task tube --record_video
 
 # 如果需要，也可以直接覆盖默认描述
 bash launch.sh --profile upsample --task tube --language_instruction "describe your task here"
@@ -349,7 +349,7 @@ python client_lift2.py \
 - `--debug`: 启用调试模式，每步需要按 Enter 确认
 - `--verbose`: 详细日志
 - `--log_latency`: 记录推理延迟
-- `--auto_init`: 自动移动到初始位置
+- `--auto_init`: 自动移动到初始位置；开始前会归位，任务正常结束后会再归位一次，按 **Ctrl+C** 中断时也会尝试自动归位
 - `--left_init_pose x y z roll pitch yaw gripper`: 左臂初始位置（gripper 归一化 0-1）
 - `--right_init_pose x y z roll pitch yaw gripper`: 右臂初始位置（gripper 归一化 0-1）
 - `--enable_upsample`: 启用动作上采样（30Hz → 60Hz）

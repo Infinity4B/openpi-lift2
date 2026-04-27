@@ -9,12 +9,15 @@ import numpy as np
 import time
 import argparse
 import collections
+import json
 import os
+import shutil
 import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import rospy
-import sys
 
 # Add parent directory to path to find deploy.utils
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -161,7 +164,7 @@ def format_launcher_summary(args):
     lines.append(f"Language Instruction: {args.language_instruction}")
 
     if args.record_video:
-        lines.append(f"Video Recording: ON (save to ./video/{args.task or 'custom'}/<next_seq>)")
+        lines.append(f"Video Recording: ON (frames -> ./pic/{args.task or 'custom'}/<next_seq>, videos -> ./video/{args.task or 'custom'}/<next_seq>)")
     if args.debug:
         lines.append('Debug Mode: ON (press Enter each step)')
 
@@ -174,19 +177,117 @@ def check_server_connectivity(host, port, timeout_seconds=2.0):
         return
 
 
-def resolve_video_output_dir(args):
+def resolve_recording_output_dirs(args):
     task_name = args.task if args.task else 'custom'
     video_root = os.path.join(parent_dir, 'video', task_name)
+    pic_root = os.path.join(parent_dir, 'pic', task_name)
     os.makedirs(video_root, exist_ok=True)
+    os.makedirs(pic_root, exist_ok=True)
 
     next_seq = 1
-    for entry in os.listdir(video_root):
-        if entry.isdigit():
-            next_seq = max(next_seq, int(entry) + 1)
+    for root in (video_root, pic_root):
+        for entry in os.listdir(root):
+            if entry.isdigit():
+                next_seq = max(next_seq, int(entry) + 1)
 
-    output_dir = os.path.join(video_root, str(next_seq))
-    os.makedirs(output_dir, exist_ok=False)
-    return output_dir
+    video_output_dir = os.path.join(video_root, str(next_seq))
+    pic_output_dir = os.path.join(pic_root, str(next_seq))
+    os.makedirs(video_output_dir, exist_ok=False)
+    os.makedirs(pic_output_dir, exist_ok=False)
+    return pic_output_dir, video_output_dir
+
+
+def prompt_keep_recorded_video(video_output_dir, pic_output_dir):
+    while True:
+        answer = input(
+            f"Keep recorded frames in {pic_output_dir}? "
+            f"Videos will be generated in background at {video_output_dir}. Enter y/yes or n/no: "
+        ).strip().lower()
+        if answer in ('n', 'no'):
+            shutil.rmtree(video_output_dir, ignore_errors=True)
+            shutil.rmtree(pic_output_dir, ignore_errors=True)
+            rospy.loginfo(f"Video recording discarded: removed {video_output_dir} and {pic_output_dir}")
+            return False
+        if answer in ('y', 'yes'):
+            return True
+        print("Please answer y/yes or n/no.")
+
+
+def finalize_recorded_video_session(args, interrupted=False):
+    if not args.record_video or not args.video_output_dir or not os.path.isdir(args.video_output_dir):
+        return
+
+    if interrupted:
+        rospy.loginfo("Run interrupted. Prompting whether to keep the recorded video session...")
+
+    try:
+        keep_recording = prompt_keep_recorded_video(args.video_output_dir, args.pic_output_dir)
+    except (EOFError, KeyboardInterrupt):
+        shutil.rmtree(args.video_output_dir, ignore_errors=True)
+        if args.pic_output_dir:
+            shutil.rmtree(args.pic_output_dir, ignore_errors=True)
+        rospy.loginfo(
+            f"Video recording discarded after interrupted prompt: removed {args.video_output_dir} and {args.pic_output_dir}"
+        )
+        return
+
+    if keep_recording:
+        start_video_transcode_worker(
+            args.pic_output_dir,
+            args.video_output_dir,
+            RosOperator.CAMERA_FILE_NAMES,
+            RosOperator.CAMERA_PIC_DIR_NAMES,
+        )
+
+
+def start_video_transcode_worker(pic_output_dir, video_output_dir, camera_file_names, camera_pic_dir_names):
+    worker_code = """
+import json
+import sys
+from deploy.utils.rosoperator import save_recorded_videos_from_frames
+
+pic_output_dir = sys.argv[1]
+video_output_dir = sys.argv[2]
+camera_file_names = json.loads(sys.argv[3])
+camera_pic_dir_names = json.loads(sys.argv[4])
+save_recorded_videos_from_frames(
+    pic_output_dir,
+    video_output_dir,
+    camera_file_names,
+    camera_pic_dir_names,
+    fps=60.0,
+)
+""".strip()
+
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            '-c',
+            worker_code,
+            pic_output_dir,
+            video_output_dir,
+            json.dumps(camera_file_names),
+            json.dumps(camera_pic_dir_names),
+        ],
+        cwd=parent_dir,
+        start_new_session=True,
+    )
+    return process
+
+
+def wait_for_debug_step_confirmation(step_index):
+    while True:
+        try:
+            answer = input(f"Step {step_index}: Press Enter to execute (Ctrl+C to abort, r to reprint action)...")
+        except (KeyboardInterrupt, EOFError):
+            raise
+
+        if answer == '':
+            return
+        if answer.strip().lower() == 'r':
+            return 'reprint'
+
+        print("Invalid input. Press Enter to execute, or type r to reprint the action.")
 
 
 class OpenPIClientModel:
@@ -535,68 +636,100 @@ def model_inference(args, config, ros_operator):
         source_hz=args.source_hz
     )
     max_publish_step = config['episode_len']
+    interrupted = False
 
     # Initial pose (normalized gripper [0, 1])
     left_init = args.left_init_pose if args.left_init_pose else [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     right_init = args.right_init_pose if args.right_init_pose else [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
-    # Auto move to initial pose
-    if args.auto_init:
-        move_to_init_pose(ros_operator, left_init, right_init,
-                         duration=args.init_duration, rate_hz=args.publish_rate)
-        if args.wait_after_init:
-            input("Press Enter to start inference...")
+    try:
+        # Auto move to initial pose
+        if args.auto_init:
+            move_to_init_pose(ros_operator, left_init, right_init,
+                             duration=args.init_duration, rate_hz=args.publish_rate)
+            if args.wait_after_init:
+                input("Press Enter to start inference...")
 
-    # Main inference loop
-    start_time = time.time()
-    count = 0
+        # Main inference loop
+        start_time = time.time()
+        count = 0
 
-    policy.reset()
-    t = 0
-    rate = rospy.Rate(args.publish_rate)
+        policy.reset()
+        t = 0
+        rate = rospy.Rate(args.publish_rate)
 
-    # Infinite loop if max_publish_step is 0 or negative
-    run_infinite = max_publish_step <= 0
+        # Infinite loop if max_publish_step is 0 or negative
+        run_infinite = max_publish_step <= 0
 
-    while (run_infinite or t < max_publish_step) and not rospy.is_shutdown():
-        action = get_action(args, config, ros_operator, policy, t)
+        # Start recording thread
+        if args.record_video:
+            ros_operator.start_recording()
 
-        duration = time.time() - start_time
-        count += 1
+        while (run_infinite or t < max_publish_step) and not rospy.is_shutdown():
+            action = get_action(args, config, ros_operator, policy, t)
 
-        if args.verbose and t % 50 == 0:
-            rospy.loginfo(f"Average Hz: {count/duration:.2f}")
+            duration = time.time() - start_time
+            count += 1
 
-        # Split dual-arm actions
-        left_action = action[:7]
-        right_action = action[7:14]
+            if args.verbose and t % 50 == 0:
+                rospy.loginfo(f"Average Hz: {count/duration:.2f}")
 
-        # Gripper values are already in [0, 5] range from step() method
-        # No additional processing needed
+            # Split dual-arm actions
+            left_action = action[:7]
+            right_action = action[7:14]
 
-        # Debug mode: print action details and wait for keypress
-        if args.debug:
-            rospy.loginfo(f"[Debug Step {t:4d}] Left:  xyz={left_action[:3]}, rpy={left_action[3:6]}, gripper={left_action[6]:.2f}")
-            rospy.loginfo(f"[Debug Step {t:4d}] Right: xyz={right_action[:3]}, rpy={right_action[3:6]}, gripper={right_action[6]:.2f}")
+            # Gripper values are already in [0, 5] range from step() method
+            # No additional processing needed
+
+            # Debug mode: print action details and wait for keypress
+            if args.debug:
+                while True:
+                    rospy.loginfo(f"[Debug Step {t:4d}] Left:  xyz={left_action[:3]}, rpy={left_action[3:6]}, gripper={left_action[6]:.2f}")
+                    rospy.loginfo(f"[Debug Step {t:4d}] Right: xyz={right_action[:3]}, rpy={right_action[3:6]}, gripper={right_action[6]:.2f}")
+                    try:
+                        confirmation = wait_for_debug_step_confirmation(t)
+                    except (KeyboardInterrupt, EOFError):
+                        rospy.loginfo("Debug mode: user aborted")
+                        interrupted = True
+                        return interrupted
+
+                    if confirmation == 'reprint':
+                        continue
+                    break
+
+            # Publish to ROS
+            ros_operator.eef_arm_publish(left_action, right_action)
+
+            if t % 10 == 0:
+                rospy.loginfo(f"[Step {t:4d}] L_gripper={left_action[6]:.2f}, R_gripper={right_action[6]:.2f}")
+
+            t += 1
+            rate.sleep()
+
+        if run_infinite:
+            rospy.loginfo(f"Infinite mode interrupted, executed {t} steps")
+        else:
+            rospy.loginfo(f"Episode completed, executed {t} steps")
+
+        return interrupted
+    except (KeyboardInterrupt, EOFError):
+        interrupted = True
+        rospy.loginfo("Inference interrupted by user")
+        return interrupted
+    finally:
+        if args.auto_init:
+            rospy.loginfo("Returning to initial pose...")
             try:
-                input(f"Step {t}: Press Enter to execute (Ctrl+C to abort)...")
-            except (KeyboardInterrupt, EOFError):
-                rospy.loginfo("Debug mode: user aborted")
-                break
+                move_to_init_pose(
+                    ros_operator,
+                    left_init,
+                    right_init,
+                    duration=args.init_duration,
+                    rate_hz=args.publish_rate,
+                )
+            except Exception as exc:
+                rospy.logwarn(f"Failed to return to initial pose: {exc}")
 
-        # Publish to ROS
-        ros_operator.eef_arm_publish(left_action, right_action)
-
-        if t % 10 == 0:
-            rospy.loginfo(f"[Step {t:4d}] L_gripper={left_action[6]:.2f}, R_gripper={right_action[6]:.2f}")
-
-        t += 1
-        rate.sleep()
-
-    if run_infinite:
-        rospy.loginfo("Infinite mode interrupted, executed {t} steps")
-    else:
-        rospy.loginfo(f"Episode completed, executed {t} steps")
 
 
 def get_arguments():
@@ -766,9 +899,10 @@ def main():
         rospy.loginfo(f"Task preset: {args.task}")
     rospy.loginfo(f"Language instruction: {args.language_instruction}")
     if args.record_video:
-        args.video_output_dir = resolve_video_output_dir(args)
-        rospy.loginfo(f"Video recording: Enabled -> {args.video_output_dir}")
+        args.pic_output_dir, args.video_output_dir = resolve_recording_output_dirs(args)
+        rospy.loginfo(f"Video recording: Enabled -> frames={args.pic_output_dir}, videos={args.video_output_dir}")
     else:
+        args.pic_output_dir = None
         args.video_output_dir = None
     if args.debug:
         rospy.loginfo("** DEBUG MODE: Press Enter to execute each step **")
@@ -784,10 +918,12 @@ def main():
     }
 
     # Start inference
+    interrupted = False
     try:
-        model_inference(args, config, ros_operator)
+        interrupted = model_inference(args, config, ros_operator)
     finally:
         ros_operator.close_video_writers()
+        finalize_recorded_video_session(args, interrupted=interrupted)
 
 
 if __name__ == '__main__':

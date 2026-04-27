@@ -87,7 +87,7 @@ bash launch.sh --profile upsample --task tube
 # 覆盖 profile 中的 host
 bash launch.sh --profile upsample --host <策略服务器IP> --task tube
 
-# 启用 3 路相机视频录制
+# 启用 3 路相机视频录制（结束后只确认是否保留；确认后静默在后台转视频；Ctrl+C 中断后也会继续询问是否保留）
 bash launch.sh --profile upsample --task tube --record_video
 
 # 直接运行客户端
@@ -140,7 +140,7 @@ python deploy/client_lift2.py \
   - `raw`: 不二值化
 
 ### 初始化
-- `--auto_init`: 自动移动到初始位姿（默认：启用）
+- `--auto_init`: 自动移动到初始位姿（默认：启用）；任务开始前会归位，任务正常结束后会再归位一次，按 **Ctrl+C** 中断时也会尝试自动归位
 - `--no_auto_init`: 禁用自动初始化
 - `--init_duration`: 到达初始位姿的时长（秒）（默认：3.0）
 - `--wait_after_init`: 初始化后等待用户按Enter键
@@ -159,7 +159,7 @@ python deploy/client_lift2.py \
 ### 日志
 - `--verbose`: 启用详细日志
 - `--log_latency`: 记录每次推理的延迟
-- `--record_video`: 录制 3 路 D405 相机视频到 `./video/{task}/{seq}/`
+- `--record_video`: 先将 3 路 D405 相机帧保存到 `./pic/{task}/{seq}/`，结束后先询问是否保留本次采集；确认保留后会静默在后台转成视频保存到 `./video/{task}/{seq}/`，这样可以更快开始下一次采集；不保留时会同时删除本次图片和视频目录。若按 **Ctrl+C** 中断，客户端会先尝试自动归位，然后继续询问是否保留本次录像
 
 ## 使用示例
 

@@ -6,6 +6,7 @@ Handles sensor data collection and end-effector pose control for ARX R5 dual-arm
 """
 
 import os
+import threading
 
 import cv2
 import rospy
@@ -16,6 +17,48 @@ from collections import deque
 import numpy as np
 
 
+def save_recorded_videos_from_frames(pic_output_dir, video_output_dir, camera_file_names, camera_pic_dir_names, fps=60.0, log_fn=None):
+    logger = log_fn or (lambda message: None)
+
+    for camera_name, file_name in camera_file_names.items():
+        pic_dir = os.path.join(pic_output_dir, camera_pic_dir_names[camera_name])
+        if not os.path.isdir(pic_dir):
+            logger(f"[Video] Missing frame directory for {camera_name}, skipping {file_name}")
+            continue
+
+        frame_names = sorted(
+            name for name in os.listdir(pic_dir)
+            if name.lower().endswith('.jpg')
+        )
+        frame_count = len(frame_names)
+        if frame_count == 0:
+            logger(f"[Video] No frames recorded for {camera_name}, skipping {file_name}")
+            continue
+
+        first_frame_path = os.path.join(pic_dir, frame_names[0])
+        first_frame = cv2.imread(first_frame_path)
+        if first_frame is None:
+            raise RuntimeError(f"Failed to read first frame from {first_frame_path}")
+
+        height, width = first_frame.shape[:2]
+        file_path = os.path.join(video_output_dir, file_name)
+        writer = cv2.VideoWriter(file_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        if not writer.isOpened():
+            raise RuntimeError(f"Failed to open video writer for {file_path}")
+
+        try:
+            for frame_name in frame_names:
+                frame_path = os.path.join(pic_dir, frame_name)
+                frame = cv2.imread(frame_path)
+                if frame is None:
+                    raise RuntimeError(f"Failed to read frame from {frame_path}")
+                writer.write(frame)
+        finally:
+            writer.release()
+
+        logger(f"[Video] Saved {camera_name}: {frame_count} frames -> {file_path} @ {fps:.1f} FPS")
+
+
 class RosOperator:
     """ROS Operator: Manages all ROS topic subscriptions and publications"""
 
@@ -23,6 +66,12 @@ class RosOperator:
         'head': 'camera_h.mp4',
         'left_wrist': 'camera_l.mp4',
         'right_wrist': 'camera_r.mp4',
+    }
+
+    CAMERA_PIC_DIR_NAMES = {
+        'head': 'camera_h',
+        'left_wrist': 'camera_l',
+        'right_wrist': 'camera_r',
     }
 
     def __init__(self, args):
@@ -51,8 +100,19 @@ class RosOperator:
         self.arm_left_cmd_publisher = None
         self.arm_right_cmd_publisher = None
 
-        self.video_writers = {}
         self.video_enabled = bool(getattr(self.args, 'video_output_dir', None))
+        self.recorded_frame_count = 0
+        self.recorded_frame_counts = {
+            'head': 0,
+            'left_wrist': 0,
+            'right_wrist': 0,
+        }
+
+        # Recording thread
+        self.recording_thread = None
+        self.recording_active = False
+        self.recording_stop_event = threading.Event()
+        self.recording_lock = threading.Lock()
 
         # Initialize ROS topics
         self.init_ros()
@@ -62,7 +122,7 @@ class RosOperator:
         # Note: rospy.init_node is called in main(), not here
 
         if self.video_enabled:
-            self.init_video_writers()
+            self.init_video_recording()
 
         # ========== Subscribe to camera topics ==========
         rospy.Subscriber(self.args.img_left_topic, Image, self.img_left_callback,
@@ -94,65 +154,122 @@ class RosOperator:
 
         rospy.loginfo("ROS Operator initialized (EEF Control)")
 
-    def init_video_writers(self):
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fps = 30.0
-        output_dir = self.args.video_output_dir
-        os.makedirs(output_dir, exist_ok=True)
+    def init_video_recording(self):
+        os.makedirs(self.args.pic_output_dir, exist_ok=True)
+        os.makedirs(self.args.video_output_dir, exist_ok=True)
 
-        for camera_name, file_name in self.CAMERA_FILE_NAMES.items():
-            self.video_writers[camera_name] = None
-            rospy.loginfo(f"[Video] Ready to record {camera_name} -> {os.path.join(output_dir, file_name)}")
+        self.recorded_frame_count = 0
+        for camera_name in self.CAMERA_FILE_NAMES:
+            pic_dir = self._get_camera_pic_dir(camera_name)
+            os.makedirs(pic_dir, exist_ok=True)
+            self.recorded_frame_counts[camera_name] = 0
+            rospy.loginfo(f"[Video] Ready to collect frames for {camera_name} -> {pic_dir}")
 
-        self.video_fourcc = fourcc
-        self.video_fps = fps
+    def _get_camera_pic_dir(self, camera_name):
+        return os.path.join(self.args.pic_output_dir, self.CAMERA_PIC_DIR_NAMES[camera_name])
 
-    def _ensure_video_writer(self, camera_name, frame):
-        writer = self.video_writers.get(camera_name)
-        if writer is not None:
-            return writer
+    def start_recording(self):
+        """Start the recording thread"""
+        if not self.video_enabled or self.recording_active:
+            return
 
-        height, width = frame.shape[:2]
-        file_path = os.path.join(self.args.video_output_dir, self.CAMERA_FILE_NAMES[camera_name])
-        writer = cv2.VideoWriter(file_path, self.video_fourcc, self.video_fps, (width, height))
-        if not writer.isOpened():
-            raise RuntimeError(f"Failed to open video writer for {file_path}")
+        self.recording_active = True
+        self.recording_stop_event.clear()
+        self.recording_thread = threading.Thread(target=self._recording_loop, daemon=True)
+        self.recording_thread.start()
+        rospy.loginfo("[Recording] Started recording thread at 60Hz")
 
-        self.video_writers[camera_name] = writer
-        rospy.loginfo(f"[Video] Recording {camera_name}: {width}x{height} @ {self.video_fps:.1f} FPS")
-        return writer
+    def stop_recording(self):
+        """Stop the recording thread"""
+        if not self.recording_active:
+            return
 
-    def _record_video_frame(self, camera_name, msg):
+        self.recording_stop_event.set()
+        if self.recording_thread:
+            self.recording_thread.join(timeout=5.0)
+        self.recording_active = False
+        rospy.loginfo(f"[Recording] Stopped. Recorded frames: head={self.recorded_frame_counts['head']}, "
+                     f"left={self.recorded_frame_counts['left_wrist']}, right={self.recorded_frame_counts['right_wrist']}")
+
+    def _recording_loop(self):
+        """Recording thread main loop - runs at 60Hz independently"""
+        rate = rospy.Rate(60)  # 60Hz recording
+
+        while not self.recording_stop_event.is_set() and not rospy.is_shutdown():
+            # Check if all camera deques have data
+            if (len(self.img_front_deque) > 0 and
+                len(self.img_left_deque) > 0 and
+                len(self.img_right_deque) > 0):
+
+                try:
+                    # Get latest frames from deque (non-blocking)
+                    img_front = self.bridge.imgmsg_to_cv2(self.img_front_deque[-1], 'passthrough')
+                    img_left = self.bridge.imgmsg_to_cv2(self.img_left_deque[-1], 'passthrough')
+                    img_right = self.bridge.imgmsg_to_cv2(self.img_right_deque[-1], 'passthrough')
+
+                    # Save frames
+                    self.save_current_frames_to_disk(img_front, img_left, img_right)
+                except Exception as e:
+                    rospy.logwarn(f"[Recording] Frame save error: {e}")
+
+            rate.sleep()
+
+    def save_current_frames_to_disk(self, img_front, img_left, img_right):
+        """Save one synchronized frame set to disk."""
+        if not self.video_enabled:
+            return
+        if img_front is None or img_left is None or img_right is None:
+            return
+
+        frames = {
+            'head': img_front,
+            'left_wrist': img_left,
+            'right_wrist': img_right,
+        }
+
+        with self.recording_lock:
+            frame_index = self.recorded_frame_count
+            for camera_name, frame in frames.items():
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                frame_path = os.path.join(self._get_camera_pic_dir(camera_name), f"{frame_index:06d}.jpg")
+                if not cv2.imwrite(frame_path, frame_bgr):
+                    raise RuntimeError(f"Failed to save frame to {frame_path}")
+
+            self.recorded_frame_count += 1
+            for camera_name in self.recorded_frame_counts:
+                self.recorded_frame_counts[camera_name] = self.recorded_frame_count
+
+    def save_recorded_videos(self):
         if not self.video_enabled:
             return
 
-        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        writer = self._ensure_video_writer(camera_name, frame)
-        writer.write(frame)
+        save_recorded_videos_from_frames(
+            self.args.pic_output_dir,
+            self.args.video_output_dir,
+            self.CAMERA_FILE_NAMES,
+            self.CAMERA_PIC_DIR_NAMES,
+            fps=60.0,
+            log_fn=rospy.loginfo,
+        )
 
     def close_video_writers(self):
-        for writer in self.video_writers.values():
-            if writer is not None:
-                writer.release()
-        self.video_writers.clear()
+        if self.recording_active:
+            self.stop_recording()
 
     def img_left_callback(self, msg):
         if len(self.img_left_deque) >= 2000:
             self.img_left_deque.popleft()
         self.img_left_deque.append(msg)
-        self._record_video_frame('left_wrist', msg)
 
     def img_right_callback(self, msg):
         if len(self.img_right_deque) >= 2000:
             self.img_right_deque.popleft()
         self.img_right_deque.append(msg)
-        self._record_video_frame('right_wrist', msg)
 
     def img_front_callback(self, msg):
         if len(self.img_front_deque) >= 2000:
             self.img_front_deque.popleft()
         self.img_front_deque.append(msg)
-        self._record_video_frame('head', msg)
 
     def img_left_depth_callback(self, msg):
         if len(self.img_left_depth_deque) >= 2000:
