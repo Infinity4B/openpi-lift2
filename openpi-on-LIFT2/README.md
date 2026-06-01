@@ -161,6 +161,18 @@ python deploy/client_lift2.py \
 - `--log_latency`: 记录每次推理的延迟
 - `--record_video`: 先将 3 路 D405 相机帧保存到 `./pic/{task}/{seq}/`，结束后先询问是否保留本次采集；确认保留后会静默在后台转成视频保存到 `./video/{task}/{seq}/`，这样可以更快开始下一次采集；不保留时会同时删除本次图片和视频目录。若按 **Ctrl+C** 中断，客户端会先尝试自动归位，然后继续询问是否保留本次录像
 
+### 图片转视频
+
+如果已有图片帧目录，可以单独运行转换脚本，不需要启动推理客户端：
+
+```bash
+# 转换一次 LIFT2 录制目录，输入目录下包含 camera_h/camera_l/camera_r 子目录
+python frames_to_video.py pic/tube/1 -o video/tube/1 --fps 60
+
+# 也可以只转换单个图片文件夹
+python frames_to_video.py pic/tube/1/camera_h -o video/tube/1/camera_h.mp4 --fps 60
+```
+
 ## 使用示例
 
 ### 快速测试
