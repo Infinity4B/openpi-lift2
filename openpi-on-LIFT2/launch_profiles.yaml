@@ -16,3 +16,18 @@ profiles:
     action_chunk_size: 30
     source_hz: 30
     target_hz: 60
+
+  rtc:
+    host: 192.168.101.101
+    port: 7777
+    client_mode: rtc
+    publish_rate: 30
+    execute_horizon: 10
+    action_chunk_size: 30
+    source_hz: 30
+    target_hz: 30
+    rtc_action_horizon: 30
+    rtc_execution_horizon: 10
+    rtc_inference_delay: 2
+    rtc_prefix_attention_schedule: exp
+    rtc_max_guidance_weight: 10.0

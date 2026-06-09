@@ -25,6 +25,7 @@ parent_dir = os.path.dirname(script_dir)
 sys.path.append(parent_dir)
 
 from openpi_client import image_tools
+from openpi_client import rtc_client_policy
 from openpi_client import websocket_client_policy
 
 from deploy.utils.rotation import pose_to_eef, apply_eef_delta, denormalize_gripper
@@ -48,6 +49,31 @@ LEGACY_RUNTIME_DEFAULTS = {
     'source_hz': 30,
     'target_hz': 30,
     'max_publish_step': DEFAULT_MAX_PUBLISH_STEP,
+}
+PROFILE_OPTIONAL_KEYS = (
+    'client_mode',
+    'rtc_action_horizon',
+    'rtc_execution_horizon',
+    'rtc_inference_delay',
+    'rtc_control_period_s',
+    'rtc_prefix_attention_schedule',
+    'rtc_max_guidance_weight',
+)
+PROFILE_VALUE_CASTERS = {
+    'host': str,
+    'client_mode': str,
+    'port': int,
+    'publish_rate': int,
+    'execute_horizon': int,
+    'action_chunk_size': int,
+    'source_hz': int,
+    'target_hz': int,
+    'rtc_action_horizon': int,
+    'rtc_execution_horizon': int,
+    'rtc_inference_delay': int,
+    'rtc_control_period_s': float,
+    'rtc_prefix_attention_schedule': str,
+    'rtc_max_guidance_weight': float,
 }
 PROFILE_REQUIRED_KEYS = (
     'host',
@@ -115,10 +141,10 @@ def apply_launch_profile(args):
     profile = load_launch_profile(config_path, args.profile)
     args.profile_config_path = str(config_path)
 
-    for key in PROFILE_REQUIRED_KEYS:
-        if getattr(args, key, None) is None:
+    for key in PROFILE_REQUIRED_KEYS + PROFILE_OPTIONAL_KEYS:
+        if key in profile and getattr(args, key, None) is None:
             value = profile[key]
-            caster = int if key != 'host' else str
+            caster = PROFILE_VALUE_CASTERS.get(key, str)
             setattr(args, key, caster(value))
 
     if args.max_publish_step is None:
@@ -130,7 +156,25 @@ def finalize_runtime_args(args):
         if getattr(args, key, None) is None:
             setattr(args, key, value)
 
+    if args.client_mode is None:
+        args.client_mode = 'standard'
+    args.client_mode = args.client_mode.lower()
+    if args.client_mode not in ('standard', 'rtc'):
+        raise ValueError(f"client_mode must be 'standard' or 'rtc', got {args.client_mode!r}")
+
     args.enable_upsample = args.enable_upsample or args.target_hz != args.source_hz
+    if args.rtc_action_horizon is None:
+        args.rtc_action_horizon = args.action_chunk_size
+    if args.rtc_execution_horizon is None:
+        args.rtc_execution_horizon = min(args.execute_horizon, args.rtc_action_horizon)
+    if args.rtc_inference_delay is None:
+        args.rtc_inference_delay = 0
+    if args.rtc_control_period_s is None:
+        args.rtc_control_period_s = 1.0 / float(args.publish_rate)
+    if args.rtc_prefix_attention_schedule is None:
+        args.rtc_prefix_attention_schedule = 'exp'
+    if args.rtc_max_guidance_weight is None:
+        args.rtc_max_guidance_weight = 10.0
     args.language_instruction = resolve_language_instruction(args)
     return args
 
@@ -148,6 +192,7 @@ def format_launcher_summary(args):
 
     lines.extend([
         f"Policy Server: {args.host}:{args.port}",
+        f"Client Mode: {args.client_mode}",
         f"Control Rate: {args.publish_rate} Hz",
         f"Execute Horizon: {args.execute_horizon} frames",
         f"Action Chunk Size: {args.action_chunk_size} frames",
@@ -158,6 +203,15 @@ def format_launcher_summary(args):
             + f" ({args.source_hz}Hz -> {args.target_hz}Hz)"
         ),
     ])
+
+    if args.client_mode == 'rtc':
+        lines.extend([
+            f"RTC Action Horizon: {args.rtc_action_horizon} frames",
+            f"RTC Execution Horizon: {args.rtc_execution_horizon} frames",
+            f"RTC Inference Delay: {args.rtc_inference_delay} frames",
+            f"RTC Control Period: {args.rtc_control_period_s:.4f} s",
+            f"RTC Prefix Attention: {args.rtc_prefix_attention_schedule}, weight={args.rtc_max_guidance_weight}",
+        ])
 
     if args.task:
         lines.append(f"Task Preset: {args.task}")
@@ -294,7 +348,10 @@ class OpenPIClientModel:
     """OpenPI Inference Client for EEF Delta Control"""
 
     def __init__(self, host, port, execute_horizon=30,
-                 enable_upsample=False, action_chunk_size=30, target_hz=30, source_hz=30):
+                 enable_upsample=False, action_chunk_size=30, target_hz=30, source_hz=30,
+                 client_mode='standard', rtc_action_horizon=None, rtc_execution_horizon=None,
+                 rtc_inference_delay=0, rtc_control_period_s=1.0 / 30.0,
+                 rtc_prefix_attention_schedule='exp', rtc_max_guidance_weight=10.0):
         """
         Args:
             host: Policy server host
@@ -304,11 +361,25 @@ class OpenPIClientModel:
             action_chunk_size: Number of frames to use from prediction when upsampling
             target_hz: Target control frequency for upsampling
             source_hz: Source prediction frequency for upsampling
+            client_mode: standard uses local action queue; rtc returns one action per tick
         """
-        self.client = websocket_client_policy.WebsocketClientPolicy(
-            host=host,
-            port=port
-        )
+        self.client_mode = client_mode
+        if self.client_mode == 'rtc':
+            self.client = rtc_client_policy.RTCClientPolicy(
+                host=host,
+                port=port,
+                action_horizon=rtc_action_horizon,
+                execution_horizon=rtc_execution_horizon,
+                inference_delay=rtc_inference_delay,
+                control_period_s=rtc_control_period_s,
+                prefix_attention_schedule=rtc_prefix_attention_schedule,
+                max_guidance_weight=rtc_max_guidance_weight,
+            )
+        else:
+            self.client = websocket_client_policy.WebsocketClientPolicy(
+                host=host,
+                port=port
+            )
         self.execute_horizon = execute_horizon
         self.executed_count = 0
         self.enable_upsample = enable_upsample
@@ -322,7 +393,13 @@ class OpenPIClientModel:
         """Reset action queue at the start of each episode"""
         self.action_plan = collections.deque()
         self.executed_count = 0
+        if self.client_mode == 'rtc':
+            self.client.reset()
         return None
+
+    def close(self):
+        if hasattr(self.client, 'close'):
+            self.client.close()
 
     def set_current_eef(self, eef):
         """
@@ -331,6 +408,68 @@ class OpenPIClientModel:
             eef: (14,) Current dual-arm EEF state [xyz, rpy, gripper] × 2
         """
         self.current_eef = eef
+
+    def _build_openpi_observation(self, obs, args):
+        head_img = obs['images']['head']
+        left_wrist_img = obs['images']['left_wrist']
+        right_wrist_img = obs['images']['right_wrist']
+        current_eef = self.current_eef.astype(np.float32)
+
+        observation = {
+            "observation.images.head": image_tools.convert_to_uint8(
+                image_tools.resize_with_pad(head_img, 224, 224)
+            ),
+            "observation.images.left_wrist": image_tools.convert_to_uint8(
+                image_tools.resize_with_pad(left_wrist_img, 224, 224)
+            ),
+            "observation.images.right_wrist": image_tools.convert_to_uint8(
+                image_tools.resize_with_pad(right_wrist_img, 224, 224)
+            ),
+            "observation.state": current_eef,
+            "prompt": args.language_instruction,
+        }
+        return observation, current_eef
+
+    def _postprocess_gripper(self, action_predict, args):
+        action_predict = np.array(action_predict).copy()
+        left_gripper_norm = action_predict[6]
+        right_gripper_norm = action_predict[13]
+
+        if args.binarize_gripper:
+            # Binarize and map to robot gripper range [0, 5].
+            GRIPPER_THRESHOLD = 0.6
+            GRIPPER_CLOSED = 0.5
+            GRIPPER_OPEN = 4.9
+            action_predict[6] = GRIPPER_OPEN if left_gripper_norm >= GRIPPER_THRESHOLD else GRIPPER_CLOSED
+            action_predict[13] = GRIPPER_OPEN if right_gripper_norm >= GRIPPER_THRESHOLD else GRIPPER_CLOSED
+        else:
+            action_predict[6] = denormalize_gripper(left_gripper_norm)
+            action_predict[13] = denormalize_gripper(right_gripper_norm)
+
+        return action_predict
+
+    def _step_rtc(self, obs, args):
+        if obs is None:
+            raise ValueError("RTC mode requires a fresh observation on every control tick")
+
+        observation, current_eef = self._build_openpi_observation(obs, args)
+
+        t0 = time.perf_counter()
+        result = self.client.infer(observation)
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        delta_action = np.asarray(result["actions"])
+        action_predict = apply_eef_delta(current_eef, delta_action)
+
+        if args.log_latency or args.verbose:
+            delay_steps = self.client.get_estimated_delay_steps()
+            rospy.loginfo(f"[RTC Latency] control tick: {latency_ms:.1f} ms, estimated delay={delay_steps} steps")
+
+        if args.verbose:
+            rospy.loginfo(f"[RTC] Delta xyz: L={delta_action[:3]}, R={delta_action[7:10]}")
+            rospy.loginfo(f"[RTC] Target xyz: L={action_predict[:3]}, R={action_predict[7:10]}")
+
+        return self._postprocess_gripper(action_predict, args)
 
     def upsample_actions(self, actions):
         """
@@ -391,26 +530,11 @@ class OpenPIClientModel:
         Returns:
             action: (14,) Single-frame action [xyz, rpy, gripper] × 2 (absolute pose)
         """
-        if not self.action_plan:
-            head_img = obs['images']['head']
-            left_wrist_img = obs['images']['left_wrist']
-            right_wrist_img = obs['images']['right_wrist']
-            current_eef = self.current_eef.astype(np.float32)
+        if self.client_mode == 'rtc':
+            return self._step_rtc(obs, args)
 
-            # Construct observation for OpenPI
-            observation = {
-                "observation.images.head": image_tools.convert_to_uint8(
-                    image_tools.resize_with_pad(head_img, 224, 224)
-                ),
-                "observation.images.left_wrist": image_tools.convert_to_uint8(
-                    image_tools.resize_with_pad(left_wrist_img, 224, 224)
-                ),
-                "observation.images.right_wrist": image_tools.convert_to_uint8(
-                    image_tools.resize_with_pad(right_wrist_img, 224, 224)
-                ),
-                "observation.state": current_eef,
-                "prompt": args.language_instruction,
-            }
+        if not self.action_plan:
+            observation, current_eef = self._build_openpi_observation(obs, args)
 
             # Call remote policy
             t0 = time.perf_counter()
@@ -474,26 +598,7 @@ class OpenPIClientModel:
                 self.action_plan.clear()
                 self.executed_count = 0
 
-        # Gripper processing
-        left_gripper_norm = action_predict[6]
-        right_gripper_norm = action_predict[13]
-
-        if args.binarize_gripper:
-            # Binarize and map to robot gripper range [0, 5]
-            # Avoid extreme values (0.5, 4.9) for safety, matching X-VLA convention
-            # Threshold: < 0.6 = closed, >= 0.6 = open
-            GRIPPER_THRESHOLD = 0.6  # Normalized threshold
-            GRIPPER_CLOSED = 0.5
-            GRIPPER_OPEN = 4.9
-            action_predict[6] = GRIPPER_OPEN if left_gripper_norm >= GRIPPER_THRESHOLD else GRIPPER_CLOSED
-            action_predict[13] = GRIPPER_OPEN if right_gripper_norm >= GRIPPER_THRESHOLD else GRIPPER_CLOSED
-        else:
-            # Continuous mode: denormalize from [0, 1] to [0, 5]
-            from deploy.utils.rotation import denormalize_gripper
-            action_predict[6] = denormalize_gripper(left_gripper_norm)
-            action_predict[13] = denormalize_gripper(right_gripper_norm)
-
-        return action_predict
+        return self._postprocess_gripper(action_predict, args)
 
 
 def get_action(args, config, ros_operator, policy, t):
@@ -633,7 +738,14 @@ def model_inference(args, config, ros_operator):
         enable_upsample=args.enable_upsample,
         action_chunk_size=args.action_chunk_size,
         target_hz=args.target_hz,
-        source_hz=args.source_hz
+        source_hz=args.source_hz,
+        client_mode=args.client_mode,
+        rtc_action_horizon=args.rtc_action_horizon,
+        rtc_execution_horizon=args.rtc_execution_horizon,
+        rtc_inference_delay=args.rtc_inference_delay,
+        rtc_control_period_s=args.rtc_control_period_s,
+        rtc_prefix_attention_schedule=args.rtc_prefix_attention_schedule,
+        rtc_max_guidance_weight=args.rtc_max_guidance_weight,
     )
     max_publish_step = config['episode_len']
     interrupted = False
@@ -717,6 +829,7 @@ def model_inference(args, config, ros_operator):
         rospy.loginfo("Inference interrupted by user")
         return interrupted
     finally:
+        policy.close()
         if args.auto_init:
             rospy.loginfo("Returning to initial pose...")
             try:
@@ -765,10 +878,26 @@ def get_arguments():
                         help='Run without max step limit')
 
     # Control parameters
+    parser.add_argument('--client_mode', type=str, choices=('standard', 'rtc'), default=None,
+                        help='Client execution mode: standard chunks actions locally; rtc requests asynchronous RTC chunks')
     parser.add_argument('--publish_rate', type=int, default=None,
                         help='Control frequency (Hz)')
     parser.add_argument('--execute_horizon', type=int, default=None,
                         help='Frames to execute per inference (default fallback: 30)')
+
+    # RTC client parameters
+    parser.add_argument('--rtc_action_horizon', type=int, default=None,
+                        help='RTC policy chunk length; defaults to action_chunk_size')
+    parser.add_argument('--rtc_execution_horizon', type=int, default=None,
+                        help='RTC background request cadence in control steps; defaults to min(execute_horizon, rtc_action_horizon)')
+    parser.add_argument('--rtc_inference_delay', type=int, default=None,
+                        help='RTC fixed inference delay in control steps')
+    parser.add_argument('--rtc_control_period_s', type=float, default=None,
+                        help='RTC control period in seconds; defaults to 1 / publish_rate')
+    parser.add_argument('--rtc_prefix_attention_schedule', type=str, default=None,
+                        help='RTC prefix attention schedule, e.g. exp or linear')
+    parser.add_argument('--rtc_max_guidance_weight', type=float, default=None,
+                        help='RTC maximum prefix guidance weight')
 
     # Action upsampling
     parser.add_argument('--enable_upsample', action='store_true', default=False,
@@ -883,8 +1012,19 @@ def main():
     rospy.loginfo("="*50)
     rospy.loginfo("OpenPI LIFT2 Client Starting (EEF Delta Control)")
     rospy.loginfo(f"Policy server: {args.host}:{args.port}")
+    rospy.loginfo(f"Client mode: {args.client_mode}")
     rospy.loginfo(f"Control rate: {args.publish_rate} Hz")
     rospy.loginfo(f"Execute horizon: {args.execute_horizon} frames")
+    if args.client_mode == 'rtc':
+        rospy.loginfo(
+            "RTC config: "
+            f"action_horizon={args.rtc_action_horizon}, "
+            f"execution_horizon={args.rtc_execution_horizon}, "
+            f"inference_delay={args.rtc_inference_delay}, "
+            f"control_period_s={args.rtc_control_period_s:.4f}, "
+            f"prefix_attention={args.rtc_prefix_attention_schedule}, "
+            f"max_guidance_weight={args.rtc_max_guidance_weight}"
+        )
     rospy.loginfo(f"Action upsampling: {'Enabled' if args.enable_upsample else 'Disabled'}")
     if args.enable_upsample:
         rospy.loginfo(f"  {args.source_hz}Hz -> {args.target_hz}Hz (chunk size: {args.action_chunk_size})")

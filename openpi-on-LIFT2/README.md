@@ -59,6 +59,17 @@ pip install -e .
 uv run scripts/serve_policy.py policy:checkpoint \
     --policy.config=pi05_lift2_lora \
     --policy.dir=checkpoints/pi05_lift2_lora/<exp_name>/<step>
+
+# 启动 RTC 策略服务器（配合机器人端 --profile rtc）
+uv run scripts/serve_policy.py \
+    --server-mode rtc \
+    --rtc-execution-horizon 10 \
+    --rtc-inference-delay 2 \
+    --rtc-prefix-attention-schedule exp \
+    --rtc-max-guidance-weight 10.0 \
+    policy:checkpoint \
+    --policy.config=pi05_lift2_lora \
+    --policy.dir=checkpoints/pi05_lift2_lora/<exp_name>/<step>
 ```
 
 服务器默认监听 8000 端口。
@@ -83,6 +94,9 @@ bash launch.sh --task tube
 
 # 上采样 profile：60Hz，30Hz -> 60Hz
 bash launch.sh --profile upsample --task tube
+
+# RTC profile：每个控制 tick 都输入当前观测，后台异步推理下一段 action chunk
+bash launch.sh --profile rtc --task tube --verbose
 
 # 覆盖 profile 中的 host
 bash launch.sh --profile upsample --host <策略服务器IP> --task tube
@@ -127,12 +141,20 @@ python deploy/client_lift2.py \
 - `stack`: `Stack the building blocks one by one with the larger ones at the bottom.`
 
 ### 控制参数
-- `launch.sh` 通过 `launch_profiles.yaml` 管理启动参数，支持 `--profile default` 和 `--profile upsample`
+- `launch.sh` 通过 `launch_profiles.yaml` 管理启动参数，支持 `--profile default`、`--profile upsample` 和 `--profile rtc`
 - `default`: `host=192.168.101.101`、`port=7777`、`publish_rate=30`、`execute_horizon=30`、`action_chunk_size=30`、`source_hz=30`、`target_hz=30`
 - `upsample`: `host=192.168.101.101`、`port=7777`、`publish_rate=60`、`execute_horizon=59`、`action_chunk_size=30`、`source_hz=30`、`target_hz=60`
+- `rtc`: `client_mode=rtc`、`publish_rate=30`、`action_chunk_size=30`、`rtc_execution_horizon=10`、`rtc_inference_delay=2`
+- `--client_mode`: 客户端执行模式，`standard` 为本地动作队列，`rtc` 为 RTC 单步客户端
 - `--host` / `--port`: 可覆盖 profile 中的服务器地址
 - `--publish_rate`: 控制频率（Hz）（默认：30）
 - `--execute_horizon`: 每次推理执行的帧数（默认：10）
+- `--rtc_action_horizon`: RTC 模型 action chunk 长度，默认等于 `action_chunk_size`
+- `--rtc_execution_horizon`: RTC 后台请求下一段 chunk 的间隔，必须不超过 `rtc_action_horizon`
+- `--rtc_inference_delay`: RTC 固定推理延迟（控制步数），需要与服务端参数一致
+- `--rtc_control_period_s`: RTC 控制周期，默认 `1 / publish_rate`
+- `--rtc_prefix_attention_schedule`: RTC 前缀 attention schedule，例如 `exp`
+- `--rtc_max_guidance_weight`: RTC 前缀引导最大权重
 - `--gripper_mode`: 夹爪处理模式
   - `low_threshold`: 低阈值二值化（默认，阈值3.5）
   - `hard`: 高阈值二值化（阈值4.25）
@@ -192,6 +214,12 @@ bash launch.sh \
     --profile upsample \
     --task tube \
     --verbose
+
+# 在机器人上：RTC client profile（需要服务端以 --server-mode rtc 启动）
+bash launch.sh \
+    --profile rtc \
+    --task tube \
+    --verbose
 ```
 
 ### 自定义初始位姿
@@ -228,11 +256,12 @@ python deploy/client_lift2.py \
 
 3. **远程推理**：
    - WebSocket连接到策略服务器
-   - 服务器返回动作序列（action_horizon × 14）
+   - standard 模式：服务器返回动作序列（action_horizon × 14），客户端本地排队执行
+   - rtc 模式：客户端每个控制 tick 输入当前观测，后台请求下一段 chunk，并立即返回单帧可执行动作
 
 4. **动作执行**：
-   - 执行前N个动作（execute_horizon）
-   - 丢弃剩余动作防止误差累积
+   - standard 模式执行前N个动作（execute_horizon），丢弃剩余动作防止误差累积
+   - rtc 模式持续执行当前 chunk，同时用 RTC prefix guidance 异步生成下一段 chunk
    - 根据模式二值化夹爪值
 
 5. **控制循环**：
