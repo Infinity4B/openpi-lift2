@@ -1,4 +1,5 @@
 import logging
+from typing import Literal, TypeAlias
 
 import einops
 import flax.nnx as nnx
@@ -14,6 +15,29 @@ import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
 logger = logging.getLogger("openpi")
+
+PrefixAttentionSchedule: TypeAlias = Literal["linear", "exp", "ones", "zeros"]
+
+
+def get_prefix_weights(start: int, end: int, total: int, schedule: PrefixAttentionSchedule) -> jax.Array:
+    """Returns RTC soft-mask weights over an action chunk.
+
+    `start` is the hard committed prefix length. `end` is the final timestep that
+    should influence inpainting; weights after `end` are zero.
+    """
+    start = jnp.minimum(start, end)
+    steps = jnp.arange(total)
+    if schedule == "ones":
+        weights = jnp.ones(total)
+    elif schedule == "zeros":
+        weights = (steps < start).astype(jnp.float32)
+    elif schedule in ("linear", "exp"):
+        weights = jnp.clip((start - 1 - steps) / (end - start + 1) + 1, 0, 1)
+        if schedule == "exp":
+            weights = weights * jnp.expm1(weights) / (jnp.e - 1)
+    else:
+        raise ValueError(f"Invalid prefix attention schedule: {schedule}")
+    return jnp.where(steps >= end, 0, weights)
 
 
 def make_attn_mask(input_mask, mask_ar):
@@ -221,6 +245,12 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        rtc_prev_action_chunk: at.Float[at.Array, "b ah ad"] | None = None,
+        rtc_inference_delay: int | at.Int[at.Array, ""] | None = None,
+        rtc_execution_horizon: int | at.Int[at.Array, ""] | None = None,
+        rtc_prefix_attention_horizon: int | at.Int[at.Array, ""] | None = None,
+        rtc_prefix_attention_schedule: PrefixAttentionSchedule = "exp",
+        rtc_max_guidance_weight: float | at.Float[at.Array, ""] = 10.0,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -230,14 +260,27 @@ class Pi0(_model.BaseModel):
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
+        use_rtc = rtc_prev_action_chunk is not None
+        if rtc_prev_action_chunk is not None:
+            rtc_prev_action_chunk = jnp.asarray(rtc_prev_action_chunk)
+            if rtc_prev_action_chunk.shape != noise.shape:
+                raise ValueError(
+                    f"rtc_prev_action_chunk must have shape {noise.shape}, got {rtc_prev_action_chunk.shape}"
+                )
+            if rtc_execution_horizon is None:
+                rtc_execution_horizon = rtc_prefix_attention_horizon
+            if rtc_inference_delay is None or rtc_execution_horizon is None:
+                raise ValueError(
+                    "rtc_inference_delay and rtc_execution_horizon must be provided with rtc_prev_action_chunk"
+                )
+
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
-        def step(carry):
-            x_t, time = carry
+        def velocity(x_t, time):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -266,7 +309,34 @@ class Pi0(_model.BaseModel):
                 adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        rtc_prefix_weights = None
+        if use_rtc:
+            rtc_prefix_weights = get_prefix_weights(
+                rtc_inference_delay,
+                rtc_execution_horizon,
+                self.action_horizon,
+                rtc_prefix_attention_schedule,
+            )
+
+        def step(carry):
+            x_t, time = carry
+            if use_rtc:
+                assert rtc_prev_action_chunk is not None
+                assert rtc_prefix_weights is not None
+                v_t = velocity(x_t, time)
+                # Match LeRobot's RTC correction cost profile: reuse the regular cached denoiser and
+                # stop gradients through it, so guidance is a lightweight residual in action space.
+                x_0 = x_t - time * jax.lax.stop_gradient(v_t)
+                correction = (rtc_prev_action_chunk - x_0) * rtc_prefix_weights[None, :, None]
+                # Constants mirror the original RTC implementation under OpenPI's reverse-time convention.
+                inv_r2 = (time**2 + (1 - time) ** 2) / (time**2)
+                c = jnp.nan_to_num(time / (1 - time), posinf=rtc_max_guidance_weight)
+                guidance_weight = jnp.minimum(c * inv_r2, rtc_max_guidance_weight)
+                v_t = v_t - guidance_weight * correction
+            else:
+                v_t = velocity(x_t, time)
 
             return x_t + dt * v_t, time + dt
 

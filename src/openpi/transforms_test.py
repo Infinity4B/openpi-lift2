@@ -39,6 +39,32 @@ def test_delta_actions_noop():
     assert transform(item) is item
 
 
+def test_reanchor_relative_rtc_prefix_rank2():
+    actions = np.array([[3, 4, 5], [5, 6, 7]])
+    state = np.array([1, 2, 3])
+
+    reanchored = _transforms.reanchor_relative_rtc_prefix(actions, state, mask=[False, True])
+
+    assert np.all(reanchored == np.array([[3, 2, 5], [5, 4, 7]]))
+    assert np.all(actions == np.array([[3, 4, 5], [5, 6, 7]]))
+
+
+def test_reanchor_relative_rtc_prefix_rank3():
+    actions = np.array([[[3, 4, 5], [5, 6, 7]], [[13, 14, 15], [15, 16, 17]]])
+    state = np.array([[1, 2, 3], [10, 20, 30]])
+
+    reanchored = _transforms.reanchor_relative_rtc_prefix(actions, state, mask=[True, False, True])
+
+    expected = np.array([[[2, 4, 2], [4, 6, 4]], [[3, 14, -15], [5, 16, -13]]])
+    assert np.all(reanchored == expected)
+
+
+def test_reanchor_relative_rtc_prefix_noop():
+    actions = np.array([[3, 4, 5], [5, 6, 7]])
+
+    assert _transforms.reanchor_relative_rtc_prefix(actions, np.array([1, 2, 3]), mask=None) is actions
+
+
 def test_absolute_actions():
     item = {"state": np.array([1, 2, 3]), "actions": np.array([[3, 4, 5], [5, 6, 7]])}
 

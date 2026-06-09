@@ -18,6 +18,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:ro
     environment:
       - CLIENT_ARGS
+      - CLIENT_SCRIPT
       - DISPLAY=$DISPLAY
       - MUJOCO_GL=${MUJOCO_GL:-egl}
       - MUJOCO_EGL_DEVICE_ID=0

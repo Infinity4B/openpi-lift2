@@ -3,6 +3,7 @@ import jax
 import pytest
 
 from openpi.models import model as _model
+from openpi.models import pi0
 from openpi.models import pi0_config
 from openpi.models import pi0_fast
 from openpi.shared import download
@@ -22,6 +23,26 @@ def test_pi0_model():
 
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=10)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
+
+
+def test_pi0_prefix_weights():
+    weights = pi0.get_prefix_weights(start=2, end=5, total=7, schedule="linear")
+    assert weights.shape == (7,)
+    assert weights[0] == 1
+    assert weights[1] == 1
+    assert weights[5] == 0
+    assert weights[6] == 0
+
+    hard_weights = pi0.get_prefix_weights(start=2, end=5, total=7, schedule="zeros")
+    assert hard_weights.tolist() == [1, 1, 0, 0, 0, 0, 0]
+
+    lerobot_style_weights = pi0.get_prefix_weights(start=2, end=10, total=30, schedule="exp")
+    assert lerobot_style_weights.shape == (30,)
+    assert lerobot_style_weights[0] == 1
+    assert lerobot_style_weights[1] == 1
+    assert lerobot_style_weights[2] > 0
+    assert lerobot_style_weights[9] > 0
+    assert lerobot_style_weights[10:].tolist() == [0] * 20
 
 
 def test_pi0_lora_model():
