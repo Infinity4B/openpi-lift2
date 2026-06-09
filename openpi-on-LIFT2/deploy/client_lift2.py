@@ -92,6 +92,7 @@ PRESET_TASK_INSTRUCTIONS = {
     'drum': 'Pick up two small drumsticks and hit the small drum.',
     'dice': 'Roll the dice and move the small stand the specified number of squares based on the number rolled.',
     'stack': 'Stack the building blocks one by one with the larger ones at the bottom.',
+    'size': 'Pick up the four randomly placed cylinders and insert each one into the matching hole according to its size.',
 }
 
 
