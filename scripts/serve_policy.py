@@ -9,9 +9,9 @@ import tyro
 
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
+from openpi.serving import rtc_policy_server
 from openpi.serving import websocket_policy_server
 from openpi.shared import normalize as _normalize
-from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
 
 
@@ -22,6 +22,13 @@ class EnvMode(enum.Enum):
     ALOHA_SIM = "aloha_sim"
     DROID = "droid"
     LIBERO = "libero"
+
+
+class ServerMode(enum.Enum):
+    """Supported policy server transports."""
+
+    WEBSOCKET = "websocket"
+    RTC = "rtc"
 
 
 @dataclasses.dataclass
@@ -52,6 +59,8 @@ class Args:
 
     # Port to serve the policy on.
     port: int = 8000
+    # Server mode to run. `rtc` enables action-prefix RTC request handling.
+    server_mode: ServerMode = ServerMode.WEBSOCKET
     # Record the policy's behavior for debugging.
     record: bool = False
 
@@ -64,6 +73,15 @@ class Args:
     fix_left_arm: bool = False
     # Fix right arm state to training data mean (for left-arm-only tasks).
     fix_right_arm: bool = False
+
+    # RTC execution horizon; this is the prefix-attention end used by RTC guidance.
+    rtc_execution_horizon: int | None = 10
+    # Fixed RTC inference delay in control timesteps.
+    rtc_inference_delay: int = 0
+    # RTC soft-mask schedule for prefix inpainting.
+    rtc_prefix_attention_schedule: str = "exp"
+    # Maximum inference-time RTC guidance weight.
+    rtc_max_guidance_weight: float = 10.0
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -112,7 +130,7 @@ def create_policy(args: Args) -> _policy.Policy:
 
 def main(args: Args) -> None:
     policy = create_policy(args)
-    policy_metadata = policy.metadata
+    policy_metadata = dict(policy.metadata)
 
     # Record the policy's behavior.
     if args.record:
@@ -132,7 +150,9 @@ def main(args: Args) -> None:
         except Exception:
             local_ip = "127.0.0.1"
 
-    logging.info("Creating server (host: 0.0.0.0, local_ip: %s, port: %d)", local_ip, args.port)
+    logging.info(
+        "Creating %s server (host: 0.0.0.0, local_ip: %s, port: %d)", args.server_mode.value, local_ip, args.port
+    )
     logging.info("LAN clients can connect to: %s:%d", local_ip, args.port)
 
     if args.debug_print:
@@ -167,16 +187,32 @@ def main(args: Args) -> None:
             fix_state_values[7:14] = state_mean[7:14]
             logging.info("Fixing right arm state to training mean: %s", state_mean[7:14])
 
-    server = websocket_policy_server.WebsocketPolicyServer(
-        policy=policy,
-        host="0.0.0.0",
-        port=args.port,
-        metadata=policy_metadata,
-        debug_print=args.debug_print,
-        debug_interval=args.debug_interval,
-        fix_state_mask=fix_state_mask,
-        fix_state_values=fix_state_values,
-    )
+    if args.server_mode == ServerMode.RTC:
+        server = rtc_policy_server.RTCPolicyServer(
+            policy=policy,
+            host="0.0.0.0",
+            port=args.port,
+            metadata=policy_metadata,
+            debug_print=args.debug_print,
+            debug_interval=args.debug_interval,
+            fix_state_mask=fix_state_mask,
+            fix_state_values=fix_state_values,
+            prefix_attention_schedule=args.rtc_prefix_attention_schedule,
+            max_guidance_weight=args.rtc_max_guidance_weight,
+            execution_horizon=args.rtc_execution_horizon,
+            inference_delay=args.rtc_inference_delay,
+        )
+    else:
+        server = websocket_policy_server.WebsocketPolicyServer(
+            policy=policy,
+            host="0.0.0.0",
+            port=args.port,
+            metadata=policy_metadata,
+            debug_print=args.debug_print,
+            debug_interval=args.debug_interval,
+            fix_state_mask=fix_state_mask,
+            fix_state_values=fix_state_values,
+        )
     server.serve_forever()
 
 

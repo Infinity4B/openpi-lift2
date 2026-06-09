@@ -59,4 +59,4 @@ EOF
 
 RUN mkdir -p /usr/share/glvnd/egl_vendor.d && echo '{"file_format_version" : "1.0.0", "ICD" : { "library_path" : "libEGL_nvidia.so.0" }}' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 
-CMD ["/bin/bash", "-c", "source /.venv/bin/activate && python examples/libero/main.py $CLIENT_ARGS"]
+CMD ["/bin/bash", "-c", "source /.venv/bin/activate && python ${CLIENT_SCRIPT:-examples/libero/main.py} $CLIENT_ARGS"]

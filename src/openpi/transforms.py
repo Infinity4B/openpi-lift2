@@ -200,6 +200,42 @@ class SubsampleActions(DataTransformFn):
         return data
 
 
+def reanchor_relative_rtc_prefix(
+    prev_actions_absolute: np.ndarray,
+    current_state: np.ndarray,
+    mask: Sequence[bool] | np.ndarray | None,
+) -> np.ndarray:
+    """Convert an absolute RTC prefix into the same delta action space as `DeltaActions`.
+
+    This mirrors `DeltaActions`: selected leading action dimensions are expressed
+    relative to the current state, while unmasked dimensions are left unchanged.
+    Rank-2 chunks `(T, A)` and rank-3 batched chunks `(B, T, A)` are supported.
+    """
+    if mask is None:
+        return prev_actions_absolute
+
+    actions = np.asarray(prev_actions_absolute).copy()
+    if actions.ndim not in (2, 3):
+        raise ValueError(f"prev_actions_absolute must be rank 2 or 3, got shape {actions.shape}")
+
+    state = np.asarray(current_state)
+    if actions.ndim == 2 and state.ndim == 2 and state.shape[0] == 1:
+        state = state[0]
+    if state.ndim not in (1, 2):
+        raise ValueError(f"current_state must be rank 1 or 2, got shape {state.shape}")
+
+    mask_arr = np.asarray(mask, dtype=bool)
+    dims = mask_arr.shape[-1]
+    if dims > actions.shape[-1]:
+        raise ValueError(f"mask length {dims} exceeds action dimension {actions.shape[-1]}")
+    if dims > state.shape[-1]:
+        raise ValueError(f"mask length {dims} exceeds state dimension {state.shape[-1]}")
+
+    anchor = np.where(mask_arr, state[..., :dims], 0)
+    actions[..., :dims] -= np.expand_dims(anchor, axis=-2)
+    return actions
+
+
 @dataclasses.dataclass(frozen=True)
 class DeltaActions(DataTransformFn):
     """Repacks absolute actions into delta action space."""
@@ -213,11 +249,7 @@ class DeltaActions(DataTransformFn):
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
-        mask = np.asarray(self.mask)
-        dims = mask.shape[-1]
-        actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
-        data["actions"] = actions
+        data["actions"] = reanchor_relative_rtc_prefix(data["actions"], data["state"], self.mask)
 
         return data
 
