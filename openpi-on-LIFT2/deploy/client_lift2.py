@@ -93,6 +93,7 @@ PRESET_TASK_INSTRUCTIONS = {
     'dice': 'Roll the dice and move the small stand the specified number of squares based on the number rolled.',
     'stack': 'Stack the building blocks one by one with the larger ones at the bottom.',
     'size': 'Pick up the four randomly placed cylinders and insert each one into the matching hole according to its size.',
+    'color': 'Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.',
 }
 
 

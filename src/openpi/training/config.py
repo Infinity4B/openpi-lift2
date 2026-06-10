@@ -1427,6 +1427,25 @@ _CONFIGS = [
       ema_decay=None,
     ) ,
     TrainConfig(
+      name="pi05_color_100_chunk30_30hz_bs32_nonorm_full_pytorch",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=30,
+          paligemma_variant="gemma_2b_lora",
+          action_expert_variant="gemma_300m_lora",
+      ),
+      data=LeRobotLift2DataConfig(
+          repo_id="color_100_30hz_nonorm",
+          default_prompt="Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.",
+          use_quantile_norm=False,
+      ),
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      pytorch_weight_path="./checkpoints/pi05_pytorch",
+      num_train_steps=50_000,
+      batch_size=32,
+      ema_decay=None,
+    ) ,
+    TrainConfig(
       name="pi05_better_tube_chunk30_30hz_bs32_nonorm_full_pytorch",
       model=pi0_config.Pi0Config(
           pi05=True,
