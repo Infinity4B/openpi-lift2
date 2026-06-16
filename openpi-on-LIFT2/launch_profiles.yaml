@@ -28,6 +28,6 @@ profiles:
     target_hz: 30
     rtc_action_horizon: 30
     rtc_execution_horizon: 10
-    rtc_inference_delay: 2
+    rtc_inference_delay: 4
     rtc_prefix_attention_schedule: exp
     rtc_max_guidance_weight: 10.0

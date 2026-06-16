@@ -10,7 +10,6 @@ Gripper range:
 """
 
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 
 # Gripper normalization constants (matching X-VLA LIFT2 and training data convention)
 GRIPPER_MIN = 0.0  # Fully closed

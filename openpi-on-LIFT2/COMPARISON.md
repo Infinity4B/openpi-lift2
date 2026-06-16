@@ -13,9 +13,9 @@
 
 ### OpenPI-on-LIFT2
 ```
-机器人 → ROS → WebSocket客户端 → OpenPI服务器 → 关节动作 → 机器人
+机器人 → ROS → WebSocket客户端 → OpenPI服务器 → EEF增量动作 → PosCmd → 机器人
          ↓
-    关节位置（14维）
+    末端位姿（14维：每臂 xyz + rpy + gripper）
 ```
 
 ## 关键差异
@@ -23,13 +23,13 @@
 | 方面 | X-VLA | OpenPI |
 |------|-------|--------|
 | **模型** | X-VLA（基于Florence-2） | π₀.₅（基于PaliGemma） |
-| **控制空间** | 末端位姿（笛卡尔空间） | 关节空间 |
-| **动作维度** | 20（每臂10：xyz + 6D旋转 + 夹爪） | 14（每臂7：6关节 + 夹爪） |
-| **状态输入** | 末端6D旋转 | 关节位置 |
+| **控制空间** | 末端位姿（笛卡尔空间） | 末端位姿（EEF delta） |
+| **动作维度** | 20（每臂10：xyz + 6D旋转 + 夹爪） | 14（每臂7：xyz + rpy + gripper） |
+| **状态输入** | 末端6D旋转 | 末端 xyz/rpy + 归一化夹爪 |
 | **通信方式** | HTTP REST API | WebSocket |
-| **动作格式** | 绝对位姿 + 相对增量 | 绝对关节位置 |
+| **动作格式** | 绝对位姿 + 相对增量 | xyz/rpy 增量 + 夹爪命令 |
 | **平滑处理** | 客户端插值（K帧） | 策略生成（隐式） |
-| **夹爪阈值** | 0.45（归一化[0,1]） | 3.5（原始值[1.0, 4.9]） |
+| **夹爪阈值** | 0.45（归一化[0,1]） | 0.6（归一化[0,1]，默认二值化） |
 
 ## 控制空间对比
 
@@ -60,28 +60,29 @@ action[10:13] += state[10:13]  # 将增量加到当前位置
 - 可能有IK求解失败
 - 控制循环较慢
 
-### OpenPI：关节空间控制
+### OpenPI：末端增量控制
 ```python
-# 状态：关节位置（14维）
+# 状态：末端位姿（14维）
 state = [
-    left_j1, left_j2, left_j3, left_j4, left_j5, left_j6, left_gripper,
-    right_j1, right_j2, right_j3, right_j4, right_j5, right_j6, right_gripper
+    left_x, left_y, left_z, left_roll, left_pitch, left_yaw, left_gripper,
+    right_x, right_y, right_z, right_roll, right_pitch, right_yaw, right_gripper
 ]
 
-# 动作：直接关节位置
-action = [相同14维格式]
+# 动作：xyz/rpy 增量 + 夹爪命令
+next_eef = apply_eef_delta(current_eef, delta_action)
+ros_operator.eef_arm_publish(left_eef, right_eef)
 ```
 
 **优点**：
-- 直接控制，无需IK
-- 控制循环更快
-- 无IK求解失败
-- 更适合学习策略
+- 与当前 LIFT2 客户端和训练数据的 EEF 表示一致
+- 动作是相对增量，更适合连续闭环控制
+- 通过 `arm_control/PosCmd` 直接发布末端命令
+- 每步可做 NaN/Inf 检查和 xyz/rpy 限幅
 
 **缺点**：
-- 任务规范不够直观
-- 难以强制笛卡尔约束
-- 需要策略学习运动学
+- 仍需要底层控制器完成末端命令执行
+- 欧拉角表示需要注意角度连续性
+- 单步限幅需要根据机器人实测调参
 
 ## 通信协议
 
@@ -164,20 +165,18 @@ CLOSED = 1.0
 gripper = OPEN if raw_value > THRESHOLD else CLOSED
 ```
 
-### OpenPI：原始值二值化
+### OpenPI：归一化二值化
 ```python
-THRESHOLD = 3.5  # 原始值 [1.0, 4.9]
+THRESHOLD = 0.6  # 归一化 [0, 1]
 OPEN = 4.9
-CLOSED = 1.0
+CLOSED = 0.5
 
 gripper = OPEN if raw_value > THRESHOLD else CLOSED
 ```
 
-两者都支持多种模式：
-- **hard**：高阈值（不敏感）
-- **soft**：软二值化带过渡区间（平滑过渡）
-- **low_threshold**：低阈值（更敏感）
-- **raw**：不二值化（连续）
+OpenPI 客户端当前提供两个开关：
+- `--binarize_gripper`：默认启用，归一化输出 `>= 0.6` 发布为张开，否则发布为闭合
+- `--no_binarize_gripper`：关闭二值化，连续归一化值反归一化到机器人夹爪范围 `[0, 5]`
 
 ## 性能特征
 
@@ -221,9 +220,9 @@ gripper = OPEN if raw_value > THRESHOLD else CLOSED
 - **总计**：~670行
 
 OpenPI更简单因为：
-- 无旋转转换（6D ↔ 欧拉角）
-- 无IK/FK计算
-- 状态表示更简单
+- 不需要 6D 旋转和欧拉角之间的转换
+- 状态和动作都固定为 14 维 EEF 表示
+- 机器人端只负责策略请求、增量累积和 `PosCmd` 发布
 
 ## 何时使用
 
@@ -234,10 +233,10 @@ OpenPI更简单因为：
 - 有良好的IK求解器
 
 ### 使用 OpenPI 当：
-- 训练数据在关节空间
-- 想要更快的控制循环
-- 想避免IK问题
-- 策略应该学习运动学
+- 训练数据和策略输出使用 14 维 EEF 表示
+- 想使用 WebSocket 远程推理和动作分块
+- 希望机器人端逻辑尽量轻量，只做必要检查和发布
+- 希望保留 EEF 控制语义，同时避免 6D 旋转转换
 
 ## 迁移指南
 
@@ -249,7 +248,7 @@ OpenPI更简单因为：
    state = eef_6d(left_pose, right_pose)  # 20维
 
    # OpenPI
-   state = np.concatenate([left_qpos, right_qpos])  # 14维
+   state = pose_to_eef(left_pose, right_pose)  # 14维：xyz/rpy/gripper
    ```
 
 2. **改变动作解释**：
@@ -259,8 +258,9 @@ OpenPI更简单因为：
    ros_operator.eef_arm_publish(left, right)
 
    # OpenPI
-   # 动作已经在关节空间
-   ros_operator.joint_arm_publish(left, right)
+   # xyz/rpy 是相对增量，夹爪是命令值
+   next_eef = apply_eef_delta(current_eef, delta_action)
+   ros_operator.eef_arm_publish(left, right)
    ```
 
 3. **更新ROS话题**：
@@ -269,23 +269,25 @@ OpenPI更简单因为：
    --arm_left_pose_topic /arm_left/arm_status_ee
 
    # OpenPI
-   --arm_left_joint_topic /arm_left/joint_states
+   --arm_left_pose_topic /arm_left/arm_status_ee
+   --arm_right_pose_topic /arm_right/arm_status_ee
+   --arm_left_cmd_topic /arm_left_cmd
+   --arm_right_cmd_topic /arm_right_cmd
    ```
 
 ### 从 OpenPI 到 X-VLA
 
-1. **添加正运动学**：
+1. **改变末端姿态表示**：
    ```python
-   # 从关节计算末端位姿
-   left_pose = forward_kinematics(left_qpos)
-   right_pose = forward_kinematics(right_qpos)
+   # 从 xyz/rpy 改为 X-VLA 需要的 6D 旋转表示
+   state = eef_rpy_to_eef_6d(left_pose, right_pose)
    ```
 
-2. **添加逆运动学**：
+2. **改变动作后处理**：
    ```python
-   # 将动作转换为关节空间
-   left_qpos = inverse_kinematics(left_action)
-   right_qpos = inverse_kinematics(right_action)
+   # 将 X-VLA 输出转换为绝对欧拉角位姿后发布
+   action = abs_6d_2_abs_euler(action)
+   ros_operator.eef_arm_publish(left_action, right_action)
    ```
 
 3. **更新通信**：
@@ -299,7 +301,7 @@ OpenPI更简单因为：
 两种实现都已准备好用于生产，各有优势：
 
 - **X-VLA**：更适合需要显式位姿控制的任务
-- **OpenPI**：更简单、更快、更直接的控制
+- **OpenPI**：EEF delta 表示更轻量，WebSocket 通信更适合远程策略推理
 
 根据以下因素选择：
 - 训练数据格式

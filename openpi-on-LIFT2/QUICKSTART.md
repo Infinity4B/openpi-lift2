@@ -2,11 +2,11 @@
 
 ## 设置（一次性）
 
-### 1. 在机器人端安装 OpenPI 客户端
+### 1. 在机器人端准备 OpenPI 客户端
 
 ```bash
-cd /path/to/openpi/packages/openpi-client
-pip install -e .
+# openpi-on-LIFT2 文件夹内自带 openpi_client，直接复制整个文件夹到机器人即可。
+# 如需额外安装依赖，请按机器人 Python/ROS 环境安装 cv_bridge、numpy、PyYAML 等。
 ```
 
 ### 2. 验证 ROS 话题
@@ -24,8 +24,8 @@ rostopic list | grep camera
 rostopic list | grep arm
 
 # 预期输出：
-# /arm_left/joint_states
-# /arm_right/joint_states
+# /arm_left/arm_status_ee
+# /arm_right/arm_status_ee
 # /arm_left_cmd
 # /arm_right_cmd
 ```
@@ -42,8 +42,8 @@ uv run scripts/serve_policy.py policy:checkpoint \
     --policy.config=pi05_lift2_lora \
     --policy.dir=checkpoints/pi05_lift2_lora/<exp_name>/<step>
 
-# 服务器将在8000端口启动
-# 你应该看到："Serving policy on 0.0.0.0:8000"
+# 默认 profile 会连接 7777 端口；请确保策略服务器监听 7777，或在客户端用 --port 覆盖。
+# 你应该看到类似："Serving policy on 0.0.0.0:7777"
 ```
 
 ### 步骤2：启动机器人系统（机器人端）
@@ -84,8 +84,8 @@ python test_client.py --host <服务器IP>
 
 ### 问题："无法连接到策略服务器"
 **解决方案**：
-- 检查策略服务器是否运行：`curl http://<服务器IP>:8000/health`
-- 检查防火墙：`sudo ufw allow 8000`
+- 检查策略服务器端口是否可达：`nc -vz <服务器IP> 7777`
+- 检查防火墙：`sudo ufw allow 7777`
 - 验证网络连通性：`ping <服务器IP>`
 
 ### 问题："找不到ROS话题"
@@ -96,7 +96,7 @@ python test_client.py --host <服务器IP>
 
 ### 问题："夹爪无响应"
 **解决方案**：
-- 尝试不同夹爪模式：`--gripper_mode hard`
+- 用 `--binarize_gripper` / `--no_binarize_gripper` 切换二值化或连续夹爪输出
 - 用 `--verbose` 检查夹爪值
 - 验证夹爪硬件是否正常
 
@@ -121,7 +121,7 @@ python test_client.py --host <服务器IP>
 
 1. 先测试简单动作
 2. 逐步增加控制频率
-3. 根据需要调整夹爪模式
+3. 根据需要调整夹爪二值化设置
 4. 为你的任务微调 execute_horizon
 5. 用 `--log_latency` 监控性能
 
@@ -129,4 +129,4 @@ python test_client.py --host <服务器IP>
 
 - 用 `--verbose` 检查日志
 - 查看 README.md 获取详细文档
-- 测试各个组件（相机、关节、策略服务器）
+- 测试各个组件（相机、EEF 状态话题、策略服务器）

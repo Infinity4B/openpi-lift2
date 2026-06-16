@@ -13,7 +13,7 @@ openpi-on-LIFT2/
 │   └── utils/
 │       ├── __init__.py                # 包初始化
 │       └── rosoperator.py             # ROS接口（220行）
-├── launch.sh                          # 启动脚本（带连通性检查）
+├── launch.sh                          # 启动脚本（source ROS 后启动客户端）
 ├── test_client.py                     # 测试脚本（无需机器人）
 ├── README.md                          # 完整文档
 ├── QUICKSTART.md                      # 快速设置指南
@@ -27,15 +27,16 @@ openpi-on-LIFT2/
 - 支持π₀.₅模型的LIFT2双臂任务
 - 低延迟通信（~60-110ms）
 
-### 2. 关节空间控制
-- 14维动作空间（每臂7维）
-- 直接关节位置控制（无需IK）
-- 比末端位姿控制更快的控制循环
+### 2. EEF 增量控制
+- 14维动作空间（每臂7维：`xyz + rpy + gripper`）
+- 策略输出 `xyz/rpy` 增量，客户端累积为下一步 EEF 位姿
+- 通过 `arm_control/PosCmd` 发布到左右臂命令话题
+- 内置 NaN/Inf 检查和单步 `xyz/rpy` 限幅
 
 ### 3. 夹爪处理
-- 多种模式：hard、soft、low_threshold、raw
-- 可配置阈值的二值化
-- 平滑过渡选项
+- 默认启用归一化夹爪二值化
+- `--binarize_gripper`：归一化值 `>= 0.6` 发布为张开，否则发布为闭合
+- `--no_binarize_gripper`：保留连续夹爪输出，并反归一化到机器人范围 `[0, 5]`
 
 ### 4. 动作分块
 - 策略生成动作序列
@@ -73,12 +74,14 @@ python test_client.py --host <服务器IP>
 
 ### 自定义配置
 ```bash
-python deploy/client_lift2.py \
+source /home/arx/Desktop/LIFT/R5/ROS/R5_ws/devel/setup.bash
+
+python3 deploy/client_lift2.py \
     --host 192.168.1.100 \
-    --port 8000 \
+    --port 7777 \
     --publish_rate 30 \
     --execute_horizon 10 \
-    --gripper_mode low_threshold \
+    --no_binarize_gripper \
     --verbose
 ```
 
@@ -88,19 +91,19 @@ python deploy/client_lift2.py \
 
 | 特性 | X-VLA | OpenPI |
 |------|-------|--------|
-| 控制空间 | 末端位姿（笛卡尔） | 关节空间 |
-| 动作维度 | 20（每臂10） | 14（每臂7） |
-| 状态输入 | 6D旋转 | 关节位置 |
+| 控制空间 | 末端位姿（笛卡尔） | 末端位姿（EEF delta） |
+| 动作维度 | 20（每臂10） | 14（每臂7：xyz + rpy + gripper） |
+| 状态输入 | 6D旋转 | xyz/rpy + 归一化夹爪 |
 | 通信方式 | HTTP REST | WebSocket |
 | 平滑处理 | 客户端 | 策略生成 |
 | 代码行数 | ~925 | ~670 |
 
 ### OpenPI实现的优势
 
-1. **更简单**：无旋转转换，无IK/FK
-2. **更快**：直接关节控制，延迟更低
-3. **更可靠**：无IK求解失败
-4. **更适合学习**：策略学习运动学
+1. **更简单**：机器人端只做观测组装、增量累积和 `PosCmd` 发布
+2. **更一致**：状态/动作均使用 14 维 EEF 表示
+3. **更安全**：对策略输出做 NaN/Inf 检查和单步限幅
+4. **更适合远程推理**：WebSocket 持久连接配合动作分块
 
 ### 性能
 
@@ -122,17 +125,17 @@ python deploy/client_lift2.py \
 
 **rosoperator.py**（220行）
 - ROS话题管理
-- 相机和关节状态订阅器
-- 关节命令发布器
+- 相机和左右臂 EEF 状态订阅器
+- `arm_control/PosCmd` 命令发布器
 - 时间戳同步
 - 图像格式转换
 
 ### 工具
 
 **launch.sh**
-- 连通性检查
-- 默认参数设置
-- 简易启动
+- source 固定 ROS 环境
+- 使用默认 profile 启动客户端
+- 可继续透传命令行参数
 
 **test_client.py**
 - 策略服务器连通性测试
@@ -169,7 +172,7 @@ python deploy/client_lift2.py \
 
 ### 机器人端
 - ROS（带ARX R5包）
-- openpi-client包
+- 文件夹内自带的 `openpi_client` 包
 - Python 3.8+
 - cv_bridge、numpy
 
@@ -177,8 +180,8 @@ python deploy/client_lift2.py \
 
 - [x] 客户端连接到策略服务器
 - [x] 图像格式正确
-- [x] 关节状态正确读取
-- [x] 动作发布到ROS
+- [x] EEF 状态正确读取
+- [x] `PosCmd` 动作发布到ROS
 - [x] 夹爪处理工作
 - [x] 自动初始化工作
 - [x] 动作分块工作
@@ -192,7 +195,7 @@ python deploy/client_lift2.py \
    - 用 `--verbose` 监控
 
 2. **调整参数**：
-   - 根据需要调整gripper_mode
+   - 根据需要使用 `--binarize_gripper` / `--no_binarize_gripper`
    - 优化execute_horizon
    - 微调控制频率
 
@@ -224,9 +227,9 @@ openpi-on-LIFT2 实现更通用且生产就绪：
 
 ✓ 完整项目结构创建
 ✓ 主客户端从X-VLA结构改编
-✓ ROS操作器简化为关节控制
+✓ ROS操作器适配 EEF 状态订阅和 `PosCmd` 发布
 ✓ WebSocket客户端集成
-✓ 夹爪处理模式实现
+✓ 夹爪二值化和连续输出开关实现
 ✓ 带execute_horizon的动作分块
 ✓ 带平滑运动的自动初始化
 ✓ 完整文档
@@ -236,12 +239,12 @@ openpi-on-LIFT2 实现更通用且生产就绪：
 
 ## 结论
 
-openpi-on-LIFT2 项目为在 LIFT2 机器人平台上运行 OpenPI 模型提供了完整的、生产就绪的解决方案。它保持了 X-VLA-on-LIFT2 的熟悉结构，同时适应了 OpenPI 的关节空间控制和 WebSocket 通信。
+openpi-on-LIFT2 项目为在 LIFT2 机器人平台上运行 OpenPI 模型提供了完整的、生产就绪的解决方案。它保持了 X-VLA-on-LIFT2 的熟悉结构，同时适应了 OpenPI 的 EEF 增量控制和 WebSocket 通信。
 
 实现特点：
 - **简单**：~670行 vs X-VLA的~925行
-- **快速**：直接关节控制，WebSocket通信
-- **可靠**：无IK失败，完整错误处理
+- **直接**：EEF 增量累积后发布 `PosCmd`
+- **可靠**：NaN/Inf 检查、单步限幅和完整错误处理
 - **文档完善**：README、QUICKSTART、COMPARISON指南
 - **易于使用**：启动脚本、测试脚本、自动初始化
 

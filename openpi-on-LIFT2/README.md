@@ -8,7 +8,7 @@ OpenPI 远程推理客户端，用于 ARX R5 双臂机器人（LIFT2 平台）�
 
 - **任务**：通用 LIFT2 双臂任务
 - **机器人**：ARX R5 双臂机械臂
-- **控制方式**：关节空间控制（14维：每臂7维）
+- **控制方式**：末端执行器（EEF）位姿控制（14维：每臂 `xyz + rpy + gripper`）
 - **相机**：3个RGB相机（头部、左腕、右腕）
 - **架构**：远程策略服务器 + 机器人端客户端
 
@@ -39,15 +39,8 @@ uv run scripts/serve_policy.py policy:checkpoint \
 ### 机器人端
 
 1. 安装了 ARX R5 软件包的 ROS 环境
-2. OpenPI 客户端包：
-```bash
-cd /path/to/openpi/packages/openpi-client
-pip install -e .
-```
-
-3. 所需 ROS 消息类型：
-   - `arm_control/JointControl`
-   - `arm_control/JointInformation`
+2. 所需 ROS 消息类型：
+   - `arm_control/PosCmd`
    - `sensor_msgs/Image`
 
 ## 使用方法
@@ -72,7 +65,7 @@ uv run scripts/serve_policy.py \
     --policy.dir=checkpoints/pi05_lift2_lora/<exp_name>/<step>
 ```
 
-服务器默认监听 8000 端口。
+机器人端默认连接 `launch_profiles.yaml` 中配置的 `192.168.101.101:7777`，请确保策略服务器监听 7777 端口，或在启动客户端时用 `--host` / `--port` 覆盖。
 
 ### 2. 启动 ROS 系统（机器人）
 
@@ -103,18 +96,25 @@ bash launch.sh --profile upsample --host <策略服务器IP> --task tube
 
 # 启用 3 路相机视频录制（结束后只确认是否保留；确认后静默在后台转视频；Ctrl+C 中断后也会继续询问是否保留）
 bash launch.sh --profile upsample --task tube --record_video
+```
 
-# 直接运行客户端
-python deploy/client_lift2.py \
+推荐在机器人端通过 `launch.sh` 启动客户端；该脚本会先 source 固定的 ROS 环境：`/home/arx/Desktop/LIFT/R5/ROS/R5_ws/devel/setup.bash`。
+
+如果需要直接运行 Python 客户端，必须先手动 source ROS 环境：
+
+```bash
+source /home/arx/Desktop/LIFT/R5/ROS/R5_ws/devel/setup.bash
+
+python3 deploy/client_lift2.py \
     --host 192.168.1.100 \
-    --port 8000 \
+    --port 7777 \
     --task towel \
     --verbose
 
 # 自定义文本会覆盖 --task 的默认描述
-python deploy/client_lift2.py \
+python3 deploy/client_lift2.py \
     --host 192.168.1.100 \
-    --port 8000 \
+    --port 7777 \
     --task tube \
     --language_instruction "Transfer the test tube carefully." \
     --verbose
@@ -123,11 +123,11 @@ python deploy/client_lift2.py \
 ## 命令行参数
 
 ### 策略服务器
-- `--host`: 策略服务器IP地址（默认：localhost）
-- `--port`: 策略服务器端口（默认：8000）
+- `--host`: 策略服务器IP地址（profile 默认：192.168.101.101）
+- `--port`: 策略服务器端口（profile 默认：7777）
 
 ### 任务配置
-- `--task`: 任务简写，自动填充默认任务描述。支持：`tube`、`towel`、`wrench`、`power_strip`、`drum`、`dice`、`stack`
+- `--task`: 任务简写，自动填充默认任务描述。支持：`tube`、`towel`、`wrench`、`power_strip`、`drum`、`dice`、`stack`、`size`、`color`
 - `--language_instruction`: 自定义任务描述；如果同时传入，会覆盖 `--task` 的默认描述
 - `--max_publish_step`: 最大执行步数（默认：1000）
 
@@ -139,6 +139,8 @@ python deploy/client_lift2.py \
 - `drum`: `Pick up two small drumsticks and hit the small drum.`
 - `dice`: `Roll the dice and move the small stand the specified number of squares based on the number rolled.`
 - `stack`: `Stack the building blocks one by one with the larger ones at the bottom.`
+- `size`: `Pick up the four randomly placed cylinders and insert each one into the matching hole according to its size.`
+- `color`: `Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.`
 
 ### 控制参数
 - `launch.sh` 通过 `launch_profiles.yaml` 管理启动参数，支持 `--profile default`、`--profile upsample` 和 `--profile rtc`
@@ -149,32 +151,31 @@ python deploy/client_lift2.py \
 - `--host` / `--port`: 可覆盖 profile 中的服务器地址
 - `--publish_rate`: 控制频率（Hz）（默认：30）
 - `--execute_horizon`: 每次推理执行的帧数（默认：10）
+- `--max_delta_xyz`: 单步 EEF xyz delta 限幅，单位米（默认：0.05）
+- `--max_delta_rpy`: 单步 EEF rpy delta 限幅，单位弧度（默认：0.2）
 - `--rtc_action_horizon`: RTC 模型 action chunk 长度，默认等于 `action_chunk_size`
 - `--rtc_execution_horizon`: RTC 后台请求下一段 chunk 的间隔，必须不超过 `rtc_action_horizon`
 - `--rtc_inference_delay`: RTC 固定推理延迟（控制步数），需要与服务端参数一致
 - `--rtc_control_period_s`: RTC 控制周期，默认 `1 / publish_rate`
 - `--rtc_prefix_attention_schedule`: RTC 前缀 attention schedule，例如 `exp`
 - `--rtc_max_guidance_weight`: RTC 前缀引导最大权重
-- `--gripper_mode`: 夹爪处理模式
-  - `low_threshold`: 低阈值二值化（默认，阈值3.5）
-  - `hard`: 高阈值二值化（阈值4.25）
-  - `soft`: 软二值化（带过渡区间）
-  - `raw`: 不二值化
+- `--binarize_gripper`: 默认启用，将策略输出的归一化夹爪值二值化为闭合/张开命令
+- `--no_binarize_gripper`: 保留连续夹爪输出，并反归一化到机器人夹爪范围 `[0, 5]`
 
 ### 初始化
 - `--auto_init`: 自动移动到初始位姿（默认：启用）；任务开始前会归位，任务正常结束后会再归位一次，按 **Ctrl+C** 中断时也会尝试自动归位
 - `--no_auto_init`: 禁用自动初始化
 - `--init_duration`: 到达初始位姿的时长（秒）（默认：3.0）
 - `--wait_after_init`: 初始化后等待用户按Enter键
-- `--left_init_pose`: 左臂初始关节位置（7个值）
-- `--right_init_pose`: 右臂初始关节位置（7个值）
+- `--left_init_pose`: 左臂初始 EEF 位姿（7个值：`x y z roll pitch yaw gripper`）
+- `--right_init_pose`: 右臂初始 EEF 位姿（7个值：`x y z roll pitch yaw gripper`）
 
 ### ROS话题
 - `--img_front_topic`: 头部相机话题（默认：/camera_h/color/image_raw）
 - `--img_left_topic`: 左腕相机话题（默认：/camera_l/color/image_raw）
 - `--img_right_topic`: 右腕相机话题（默认：/camera_r/color/image_raw）
-- `--arm_left_joint_topic`: 左臂关节状态（默认：/arm_left/joint_states）
-- `--arm_right_joint_topic`: 右臂关节状态（默认：/arm_right/joint_states）
+- `--arm_left_pose_topic`: 左臂末端位姿状态（默认：/arm_left/arm_status_ee）
+- `--arm_right_pose_topic`: 右臂末端位姿状态（默认：/arm_right/arm_status_ee）
 - `--arm_left_cmd_topic`: 左臂命令话题（默认：/arm_left_cmd）
 - `--arm_right_cmd_topic`: 右臂命令话题（默认：/arm_right_cmd）
 
@@ -224,7 +225,7 @@ bash launch.sh \
 
 ### 自定义初始位姿
 ```bash
-python deploy/client_lift2.py \
+bash launch.sh \
     --host 192.168.1.100 \
     --left_init_pose -0.0008 0.0032 0.0055 -0.0037 -0.0025 0.0005 4.8946 \
     --right_init_pose 0.0 0.0 0.0 0.0 0.0 0.0 4.9 \
@@ -234,7 +235,7 @@ python deploy/client_lift2.py \
 
 ### 高频控制
 ```bash
-python deploy/client_lift2.py \
+bash launch.sh \
     --host 192.168.1.100 \
     --publish_rate 60 \
     --execute_horizon 5 \
@@ -247,17 +248,18 @@ python deploy/client_lift2.py \
 
 1. **观测采集**：
    - 3个相机的RGB图像（头部、左腕、右腕）
-   - 双臂关节位置（14维）
+   - 双臂 EEF 位姿（14维：每臂 `xyz + rpy + gripper`）
 
 2. **预处理**：
    - 图像调整为224x224（带padding）
    - 转换为uint8格式
-   - 关节位置原样传递（服务器端归一化）
+   - EEF 位姿原样传递（服务器端归一化）
 
 3. **远程推理**：
    - WebSocket连接到策略服务器
    - standard 模式：服务器返回动作序列（action_horizon × 14），客户端本地排队执行
    - rtc 模式：客户端每个控制 tick 输入当前观测，后台请求下一段 chunk，并立即返回单帧可执行动作
+   - action 表示为 EEF delta：`delta_xyz + delta_rpy + gripper`，客户端会累积 delta 得到目标 EEF 位姿后发布 `PosCmd`
 
 4. **动作执行**：
    - standard 模式执行前N个动作（execute_horizon），丢弃剩余动作防止误差累积
@@ -265,48 +267,33 @@ python deploy/client_lift2.py \
    - 根据模式二值化夹爪值
 
 5. **控制循环**：
-   - 以指定频率发布关节命令
+   - 以指定频率发布 EEF `PosCmd` 命令
    - 动作队列耗尽时重新推理
 
 ### 夹爪处理
 
-策略输出连续的夹爪值，会被二值化：
+策略输出归一化夹爪值，客户端默认启用二值化：
 
-- **low_threshold**（默认）：阈值3.5
-  - > 3.5 → 4.9（张开）
-  - ≤ 3.5 → 0.5（闭合）
-
-- **hard**：阈值4.25
-  - > 4.25 → 4.9（张开）
-  - ≤ 4.25 → 0.5（闭合）
-
-- **soft**：软二值化，过渡区间0.5
-  - > 4.0 → 4.9（张开）
-  - < 3.0 → 0.5（闭合）
-  - 3.0-4.0 → 线性插值
-
-- **raw**：限制在[0.5, 5.0]范围内
+- `--binarize_gripper`：默认启用，归一化值 `>= 0.6` 发布为 `4.9`（张开），否则发布为 `0.5`（闭合）
+- `--no_binarize_gripper`：关闭二值化，将连续归一化值反归一化到机器人夹爪范围 `[0, 5]`
 
 ## 与 X-VLA-on-LIFT2 对比
 
 | 特性 | X-VLA-on-LIFT2 | OpenPI-on-LIFT2 |
 |------|----------------|-----------------|
 | 模型 | X-VLA | OpenPI π₀.₅ |
-| 控制空间 | 末端位姿（6D） | 关节空间（7D每臂） |
-| 动作表示 | 绝对位姿+增量 | 关节位置 |
+| 控制空间 | 末端位姿（6D） | 末端执行器 EEF 位姿（7D每臂） |
+| 动作表示 | 绝对位姿+增量 | EEF delta + gripper |
 | 通信方式 | HTTP REST API | WebSocket |
 | 平滑处理 | 线性插值 | 无（策略生成） |
-| 状态输入 | 末端6D旋转 | 关节位置 |
+| 状态输入 | 末端6D旋转 | EEF `xyz + rpy + gripper` |
 
 ## 故障排除
 
 ### 连接问题
 ```bash
-# 测试策略服务器连通性
-curl http://<服务器IP>:8000/health
-
-# 检查端口是否开放
-telnet <服务器IP> 8000
+# 检查策略服务器端口是否开放
+nc -vz <服务器IP> 7777
 ```
 
 ### ROS话题问题
@@ -317,13 +304,13 @@ rostopic list
 # 检查相机数据
 rostopic hz /camera_h/color/image_raw
 
-# 检查关节状态
-rostopic echo /arm_left/joint_states
+# 检查 EEF 状态
+rostopic echo /arm_left/arm_status_ee
 ```
 
 ### 夹爪不动
-- 尝试不同夹爪模式：`--gripper_mode hard` 或 `--gripper_mode soft`
-- 用 `--verbose` 检查日志中的夹爪值
+- 先用 `--verbose` 检查日志中的夹爪值
+- 如需排查连续输出，可临时加 `--no_binarize_gripper` 关闭二值化
 
 ### 延迟高
 - 检查机器人和服务器之间的网络带宽
@@ -335,7 +322,7 @@ rostopic echo /arm_left/joint_states
 1. **网络**：使用有线千兆以太网获得最低延迟
 2. **控制频率**：推荐30Hz，快速任务可用60Hz
 3. **执行范围**：10帧平衡响应性和稳定性
-4. **夹爪模式**：从 `low_threshold` 开始，根据需要调整
+4. **夹爪处理**：默认使用二值化；如需排查连续输出，可临时使用 `--no_binarize_gripper`
 
 ## 安全提示
 

@@ -22,24 +22,23 @@ import rospy
 # Add parent directory to path to find deploy.utils
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
-sys.path.append(parent_dir)
+# Prefer the self-contained copy under openpi-on-LIFT2 over any globally installed
+# or workspace-level openpi_client package on the robot.
+sys.path.insert(0, parent_dir)
 
 from openpi_client import image_tools
-from openpi_client import rtc_client_policy
 from openpi_client import websocket_client_policy
 
 from deploy.utils.rotation import pose_to_eef, apply_eef_delta, denormalize_gripper
 from deploy.utils.rosoperator import RosOperator
 
-task_config = {
-    'camera_names': ['head', 'left_wrist', 'right_wrist']
-}
+CAMERA_NAMES = ['head', 'left_wrist', 'right_wrist']
 
 DEFAULT_LANGUAGE_INSTRUCTION = 'perform task'
 DEFAULT_MAX_PUBLISH_STEP = 1000
-DEFAULT_PROFILE_NAME = 'default'
 DEFAULT_LAUNCH_CONFIG = Path(parent_dir) / 'launch_profiles.yaml'
-DEFAULT_ROS_SETUP = Path.home() / 'Desktop' / 'LIFT' / 'R5' / 'ROS' / 'R5_ws' / 'devel' / 'setup.bash'
+DEFAULT_MAX_DELTA_XYZ = 0.05
+DEFAULT_MAX_DELTA_RPY = 0.2
 LEGACY_RUNTIME_DEFAULTS = {
     'host': '192.168.101.101',
     'port': 7777,
@@ -367,6 +366,8 @@ class OpenPIClientModel:
         """
         self.client_mode = client_mode
         if self.client_mode == 'rtc':
+            from openpi_client import rtc_client_policy
+
             self.client = rtc_client_policy.RTCClientPolicy(
                 host=host,
                 port=port,
@@ -416,6 +417,8 @@ class OpenPIClientModel:
         left_wrist_img = obs['images']['left_wrist']
         right_wrist_img = obs['images']['right_wrist']
         current_eef = self.current_eef.astype(np.float32)
+        if not np.all(np.isfinite(current_eef)):
+            raise ValueError(f"Current EEF contains NaN/Inf: {current_eef}")
 
         observation = {
             "observation.images.head": image_tools.convert_to_uint8(
@@ -431,6 +434,28 @@ class OpenPIClientModel:
             "prompt": args.language_instruction,
         }
         return observation, current_eef
+
+    def _sanitize_delta_action(self, delta_action, args):
+        delta_action = np.asarray(delta_action, dtype=np.float32).copy()
+        if delta_action.shape != (14,):
+            raise ValueError(f"Expected delta action shape (14,), got {delta_action.shape}")
+        if not np.all(np.isfinite(delta_action)):
+            raise ValueError(f"Policy delta action contains NaN/Inf: {delta_action}")
+
+        max_delta_xyz = float(args.max_delta_xyz)
+        max_delta_rpy = float(args.max_delta_rpy)
+        clipped_delta = delta_action.copy()
+        clipped_delta[0:3] = np.clip(clipped_delta[0:3], -max_delta_xyz, max_delta_xyz)
+        clipped_delta[3:6] = np.clip(clipped_delta[3:6], -max_delta_rpy, max_delta_rpy)
+        clipped_delta[7:10] = np.clip(clipped_delta[7:10], -max_delta_xyz, max_delta_xyz)
+        clipped_delta[10:13] = np.clip(clipped_delta[10:13], -max_delta_rpy, max_delta_rpy)
+
+        if not np.allclose(clipped_delta, delta_action):
+            rospy.logwarn(
+                "[Safety] Clipped delta action: "
+                f"max_xyz={max_delta_xyz:.4f} m, max_rpy={max_delta_rpy:.4f} rad"
+            )
+        return clipped_delta
 
     def _postprocess_gripper(self, action_predict, args):
         action_predict = np.array(action_predict).copy()
@@ -460,7 +485,7 @@ class OpenPIClientModel:
         result = self.client.infer(observation)
         latency_ms = (time.perf_counter() - t0) * 1000
 
-        delta_action = np.asarray(result["actions"])
+        delta_action = self._sanitize_delta_action(result["actions"], args)
         action_predict = apply_eef_delta(current_eef, delta_action)
 
         if args.log_latency or args.verbose:
@@ -555,6 +580,7 @@ class OpenPIClientModel:
             absolute_actions = []
             pred_eef = current_eef.copy()  # Start from current observation
             for delta_action in action_chunk:
+                delta_action = self._sanitize_delta_action(delta_action, args)
                 next_eef = apply_eef_delta(pred_eef, delta_action)  # Relative to previous prediction
                 absolute_actions.append(next_eef)
                 pred_eef = next_eef  # Update for next delta (accumulate)
@@ -603,7 +629,7 @@ class OpenPIClientModel:
         return self._postprocess_gripper(action_predict, args)
 
 
-def get_action(args, config, ros_operator, policy, t):
+def get_action(args, config, ros_operator, policy):
     """
     Get action with intelligent sensor query strategy
 
@@ -612,15 +638,13 @@ def get_action(args, config, ros_operator, policy, t):
         config: Configuration dict
         ros_operator: ROS operator instance
         policy: ClientModel instance
-        t: Current timestep
-
     Returns:
         action: (14,) Action [xyz, rpy, gripper] × 2
     """
     print_flag = True
     rate = rospy.Rate(args.publish_rate)
 
-    while True and not rospy.is_shutdown():
+    while not rospy.is_shutdown():
         # Case 1: Action queue has remaining frames, use directly
         if len(policy.action_plan) > 0:
             action = policy.step(None, args)
@@ -689,8 +713,9 @@ def move_to_init_pose(ros_operator, left_init, right_init, duration=3.0, rate_hz
     left_current_msg = ros_operator.arm_left_pose_deque[-1]
     right_current_msg = ros_operator.arm_right_pose_deque[-1]
 
-    left_current = pose_to_eef(left_current_msg, right_current_msg)[:7]
-    right_current = pose_to_eef(left_current_msg, right_current_msg)[7:14]
+    current_eef = pose_to_eef(left_current_msg, right_current_msg)
+    left_current = current_eef[:7]
+    right_current = current_eef[7:14]
 
     left_init = np.array(left_init)
     right_init = np.array(right_init)
@@ -698,7 +723,7 @@ def move_to_init_pose(ros_operator, left_init, right_init, duration=3.0, rate_hz
     rospy.loginfo(f"Left arm: {left_current[:3]} → {left_init[:3]}")
     rospy.loginfo(f"Right arm: {right_current[:3]} → {right_init[:3]}")
 
-    total_steps = int(duration * rate_hz)
+    total_steps = max(1, int(duration * rate_hz))
 
     # Linear interpolation
     for step in range(total_steps + 1):
@@ -780,7 +805,7 @@ def model_inference(args, config, ros_operator):
             ros_operator.start_recording()
 
         while (run_infinite or t < max_publish_step) and not rospy.is_shutdown():
-            action = get_action(args, config, ros_operator, policy, t)
+            action = get_action(args, config, ros_operator, policy)
 
             duration = time.time() - start_time
             count += 1
@@ -860,9 +885,6 @@ def get_arguments():
                         help='Only validate launch config and connectivity, then exit')
     parser.add_argument('--skip_connectivity_check', action='store_true', default=False,
                         help='Skip policy server connectivity check before startup')
-    parser.add_argument('--ros_setup', type=str, default=None,
-                        help=f'ROS setup.bash path hint (default: {DEFAULT_ROS_SETUP})')
-
     # Policy server
     parser.add_argument('--host', type=str, default=None,
                         help='Policy server host')
@@ -886,6 +908,10 @@ def get_arguments():
                         help='Control frequency (Hz)')
     parser.add_argument('--execute_horizon', type=int, default=None,
                         help='Frames to execute per inference (default fallback: 30)')
+    parser.add_argument('--max_delta_xyz', type=float, default=DEFAULT_MAX_DELTA_XYZ,
+                        help=f'Max per-step EEF xyz delta in meters (default: {DEFAULT_MAX_DELTA_XYZ})')
+    parser.add_argument('--max_delta_rpy', type=float, default=DEFAULT_MAX_DELTA_RPY,
+                        help=f'Max per-step EEF rpy delta in radians (default: {DEFAULT_MAX_DELTA_RPY})')
 
     # RTC client parameters
     parser.add_argument('--rtc_action_horizon', type=int, default=None,
@@ -1001,10 +1027,6 @@ def main():
         if args.check:
             return
 
-        ros_setup = Path(args.ros_setup).expanduser() if args.ros_setup else DEFAULT_ROS_SETUP
-        if not ros_setup.is_file():
-            print(f'Warning: ROS setup file not found: {ros_setup}')
-            print('Please source the correct ROS environment before running this client.')
         print()
         print('Starting OpenPI client...')
         print()
@@ -1056,7 +1078,7 @@ def main():
     # Configuration
     config = {
         'episode_len': args.max_publish_step,
-        'camera_names': task_config['camera_names'],
+        'camera_names': CAMERA_NAMES,
     }
 
     # Start inference
