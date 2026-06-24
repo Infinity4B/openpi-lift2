@@ -396,6 +396,7 @@ class OpenPIClientModel:
         """Reset action queue at the start of each episode"""
         self.action_plan = collections.deque()
         self.executed_count = 0
+        self.rtc_pred_eef = None
         if self.client_mode == 'rtc':
             self.client.reset()
         return None
@@ -486,7 +487,11 @@ class OpenPIClientModel:
         latency_ms = (time.perf_counter() - t0) * 1000
 
         delta_action = self._sanitize_delta_action(result["actions"], args)
-        action_predict = apply_eef_delta(current_eef, delta_action)
+        # RTC returns one consecutive delta per tick. Accumulate on the last commanded
+        # target, matching standard chunk execution and avoiding sensor-lag re-anchoring.
+        base_eef = current_eef if self.rtc_pred_eef is None else self.rtc_pred_eef
+        action_predict = apply_eef_delta(base_eef, delta_action)
+        self.rtc_pred_eef = action_predict.copy()
 
         if args.log_latency or args.verbose:
             delay_steps = self.client.get_estimated_delay_steps()
