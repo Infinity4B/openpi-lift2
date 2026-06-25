@@ -10,11 +10,14 @@ import time
 import argparse
 import collections
 import json
+import math
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import statistics
+import uuid
 from pathlib import Path
 
 import rospy
@@ -37,8 +40,14 @@ CAMERA_NAMES = ['head', 'left_wrist', 'right_wrist']
 DEFAULT_LANGUAGE_INSTRUCTION = 'perform task'
 DEFAULT_MAX_PUBLISH_STEP = 1000
 DEFAULT_LAUNCH_CONFIG = Path(parent_dir) / 'launch_profiles.yaml'
+DEFAULT_RTC_COMPARE_OUTPUT_DIR = Path(parent_dir) / 'rtc_real_compare'
 DEFAULT_MAX_DELTA_XYZ = 0.05
 DEFAULT_MAX_DELTA_RPY = 0.2
+RTC_COMPARE_CAMERA_DIR_NAMES = {
+    'head': 'camera_h',
+    'left_wrist': 'camera_l',
+    'right_wrist': 'camera_r',
+}
 LEGACY_RUNTIME_DEFAULTS = {
     'host': '192.168.101.101',
     'port': 7777,
@@ -219,7 +228,16 @@ def format_launcher_summary(args):
     lines.append(f"Language Instruction: {args.language_instruction}")
 
     if args.record_video:
-        lines.append(f"Video Recording: ON (frames -> ./pic/{args.task or 'custom'}/<next_seq>, videos -> ./video/{args.task or 'custom'}/<next_seq>)")
+        lines.append(
+            f"Video Recording: ON (tmp frames -> /tmp/openpi-lift2/{args.task or 'custom'}/<session_id>/frames, "
+            f"videos -> ./video/{args.task or 'custom'}/<next_seq>)"
+        )
+    if args.rtc_compare_record:
+        lines.append(
+            "RTC Compare Recording: ON "
+            f"(dir -> {args.rtc_compare_output_dir}/{args.task or 'custom'}, "
+            f"suffix -> _{get_rtc_compare_mode_suffix(args.client_mode)})"
+        )
     if args.debug:
         lines.append('Debug Mode: ON (press Enter each step)')
 
@@ -247,57 +265,100 @@ def resolve_recording_output_dirs(args):
 
     video_output_dir = os.path.join(video_root, str(next_seq))
     pic_output_dir = os.path.join(pic_root, str(next_seq))
-    os.makedirs(video_output_dir, exist_ok=False)
-    os.makedirs(pic_output_dir, exist_ok=False)
     return pic_output_dir, video_output_dir
 
 
-def prompt_keep_recorded_video(video_output_dir, pic_output_dir):
+def resolve_tmp_recording_session_dirs(args):
+    task_name = args.task if args.task else 'custom'
+    session_id = f"{time.strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    session_dir = os.path.join('/tmp/openpi-lift2', task_name, session_id)
+    frames_dir = os.path.join(session_dir, 'frames')
+    videos_dir = os.path.join(session_dir, 'videos')
+    os.makedirs(frames_dir, exist_ok=True)
+    os.makedirs(videos_dir, exist_ok=True)
+    args.recording_tmp_session_dir = session_dir
+    args.recording_tmp_frames_dir = frames_dir
+    args.recording_tmp_videos_dir = videos_dir
+    rospy.loginfo(f"Recording tmp session: {session_dir}")
+    return frames_dir, videos_dir
+
+
+def setup_recording_output_dirs(args):
+    args.record_video_final_pic_dir = None
+    args.record_video_final_video_dir = None
+    if args.record_video:
+        pic_dir, video_dir = resolve_recording_output_dirs(args)
+        args.record_video_final_pic_dir = pic_dir
+        args.record_video_final_video_dir = video_dir
+        rospy.loginfo(
+            f"Record video final output intent: videos={args.record_video_final_video_dir}"
+        )
+
+    if args.record_video or args.rtc_compare_record:
+        frames_dir, videos_dir = resolve_tmp_recording_session_dirs(args)
+        args.pic_output_dir = frames_dir
+        args.video_output_dir = videos_dir
+        args.camera_pic_dir_names = RosOperator.CAMERA_PIC_DIR_NAMES
+        args.camera_file_names = RosOperator.CAMERA_FILE_NAMES
+    else:
+        args.pic_output_dir = None
+        args.video_output_dir = None
+        args.recording_tmp_session_dir = None
+        args.recording_tmp_frames_dir = None
+        args.recording_tmp_videos_dir = None
+
+
+def prompt_keep_recorded_video(record_video_final_video_dir, recording_tmp_frames_dir):
     while True:
         answer = input(
-            f"Keep recorded frames in {pic_output_dir}? "
-            f"Videos will be generated in background at {video_output_dir}. Enter y/yes or n/no: "
+            f"Keep --record_video outputs? Frames are in tmp session {recording_tmp_frames_dir}; "
+            f"MP4s will be copied to {record_video_final_video_dir} after background transcode. "
+            f"Enter y/yes or n/no: "
         ).strip().lower()
         if answer in ('n', 'no'):
-            shutil.rmtree(video_output_dir, ignore_errors=True)
-            shutil.rmtree(pic_output_dir, ignore_errors=True)
-            rospy.loginfo(f"Video recording discarded: removed {video_output_dir} and {pic_output_dir}")
+            rospy.loginfo(
+                "Record video output discarded. RTC compare MP4 copies (if enabled) are unaffected."
+            )
             return False
         if answer in ('y', 'yes'):
             return True
         print("Please answer y/yes or n/no.")
 
 
+def get_video_copy_outputs(args, include_record_video=True):
+    tmp_videos_dir = getattr(args, 'recording_tmp_videos_dir', None)
+    if not tmp_videos_dir:
+        return []
+
+    copy_pairs = []
+    for camera_name, camera_dir_name in RTC_COMPARE_CAMERA_DIR_NAMES.items():
+        source_path = str(Path(tmp_videos_dir) / RosOperator.CAMERA_FILE_NAMES[camera_name])
+        if include_record_video and getattr(args, 'record_video', False):
+            final_video_dir = getattr(args, 'record_video_final_video_dir', None)
+            if final_video_dir:
+                copy_pairs.append((
+                    source_path,
+                    str(Path(final_video_dir) / RosOperator.CAMERA_FILE_NAMES[camera_name]),
+                ))
+        if getattr(args, 'rtc_compare_record', False) and getattr(args, 'rtc_compare_task_dir', None):
+            suffix = args.rtc_compare_mode_suffix
+            task_dir = Path(args.rtc_compare_task_dir)
+            copy_pairs.append((
+                source_path,
+                str(task_dir / f'{camera_dir_name}_{suffix}.mp4'),
+            ))
+    return copy_pairs
+
+
 def finalize_recorded_video_session(args, interrupted=False):
-    if not args.record_video or not args.video_output_dir or not os.path.isdir(args.video_output_dir):
-        return
-
-    if interrupted:
-        rospy.loginfo("Run interrupted. Prompting whether to keep the recorded video session...")
-
-    try:
-        keep_recording = prompt_keep_recorded_video(args.video_output_dir, args.pic_output_dir)
-    except (EOFError, KeyboardInterrupt):
-        shutil.rmtree(args.video_output_dir, ignore_errors=True)
-        if args.pic_output_dir:
-            shutil.rmtree(args.pic_output_dir, ignore_errors=True)
-        rospy.loginfo(
-            f"Video recording discarded after interrupted prompt: removed {args.video_output_dir} and {args.pic_output_dir}"
-        )
-        return
-
-    if keep_recording:
-        start_video_transcode_worker(
-            args.pic_output_dir,
-            args.video_output_dir,
-            RosOperator.CAMERA_FILE_NAMES,
-            RosOperator.CAMERA_PIC_DIR_NAMES,
-        )
+    finalize_video_outputs(args, interrupted=interrupted)
 
 
-def start_video_transcode_worker(pic_output_dir, video_output_dir, camera_file_names, camera_pic_dir_names):
+def start_video_transcode_worker(pic_output_dir, video_output_dir, camera_file_names, camera_pic_dir_names, copy_outputs=None):
     worker_code = """
 import json
+import os
+import shutil
 import sys
 from deploy.utils.rosoperator import save_recorded_videos_from_frames
 
@@ -305,6 +366,7 @@ pic_output_dir = sys.argv[1]
 video_output_dir = sys.argv[2]
 camera_file_names = json.loads(sys.argv[3])
 camera_pic_dir_names = json.loads(sys.argv[4])
+copy_outputs = json.loads(sys.argv[5]) if len(sys.argv) > 5 else {}
 save_recorded_videos_from_frames(
     pic_output_dir,
     video_output_dir,
@@ -312,6 +374,14 @@ save_recorded_videos_from_frames(
     camera_pic_dir_names,
     fps=60.0,
 )
+copy_output_map = dict(copy_outputs) if isinstance(copy_outputs, list) else (copy_outputs or {})
+for source_path, target_path in copy_output_map.items():
+    if not os.path.exists(source_path):
+        print(f"[Recording] Missing transcode output to copy: {source_path}", flush=True)
+        continue
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    shutil.copy2(source_path, target_path)
+    print(f"[Recording] Copied transcode output: {source_path} -> {target_path}", flush=True)
 """.strip()
 
     process = subprocess.Popen(
@@ -323,11 +393,546 @@ save_recorded_videos_from_frames(
             video_output_dir,
             json.dumps(camera_file_names),
             json.dumps(camera_pic_dir_names),
+            json.dumps(copy_outputs or []),
         ],
         cwd=parent_dir,
         start_new_session=True,
     )
     return process
+
+
+def setup_rtc_compare_recording_output(args):
+    if not getattr(args, 'rtc_compare_record', False) or not getattr(args, 'rtc_compare_task_dir', None):
+        args.rtc_compare_recording_enabled = False
+        return
+
+    args.rtc_compare_recording_enabled = True
+    rospy.loginfo(
+        f"RTC compare MP4 output intent: {args.rtc_compare_task_dir} "
+        f"(suffix: _{args.rtc_compare_mode_suffix})"
+    )
+
+
+def should_start_video_recording(args):
+    return bool(
+        getattr(args, 'recording_tmp_frames_dir', None)
+        and getattr(args, 'recording_tmp_videos_dir', None)
+    )
+
+
+def link_recorded_frames_to_rtc_compare(args):
+    # Deprecated intentionally: rtc_compare must not copy or hard-link frames
+    # from --record_video. The MP4s are copied only after the unified transcode
+    # worker finishes converting tmp frames -> tmp videos.
+    return
+
+
+def get_rtc_compare_task_name(args):
+    return args.task if args.task else 'custom'
+
+
+def get_rtc_compare_mode_suffix(client_mode):
+    return 'withrtc' if client_mode == 'rtc' else 'nortc'
+
+
+def get_rtc_compare_mode_name(client_mode):
+    return 'rtc' if client_mode == 'rtc' else 'non_rtc'
+
+
+def _resolve_rtc_compare_root(output_dir):
+    output_path = Path(output_dir).expanduser()
+    if not output_path.is_absolute():
+        output_path = Path(parent_dir) / output_path
+    return output_path
+
+
+def prepare_rtc_compare_output(args):
+    if not args.rtc_compare_record:
+        args.rtc_compare_task_dir = None
+        args.rtc_compare_mode_suffix = None
+        args.rtc_compare_intervals = []
+        return
+
+    task_name = get_rtc_compare_task_name(args)
+    mode_suffix = get_rtc_compare_mode_suffix(args.client_mode)
+    task_dir = _resolve_rtc_compare_root(args.rtc_compare_output_dir) / task_name
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    for file_name in (
+        f'action_timeline_{mode_suffix}.json',
+        f'action_timeline_{mode_suffix}.png',
+        f'inference_timeline_{mode_suffix}.json',
+        f'inference_timeline_{mode_suffix}.png',
+        f'camera_h_{mode_suffix}.mp4',
+        f'camera_l_{mode_suffix}.mp4',
+        f'camera_r_{mode_suffix}.mp4',
+        'rtc_vs_nortc_comparison.json',
+        'rtc_vs_nortc_comparison.png',
+    ):
+        path = task_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    args.rtc_compare_task_dir = str(task_dir)
+    args.rtc_compare_mode_suffix = mode_suffix
+    args.rtc_compare_mode_name = get_rtc_compare_mode_name(args.client_mode)
+    args.rtc_compare_intervals = []
+    args.rtc_compare_frame_index = 0
+    args.rtc_compare_action_fetch_index = 0
+    args.rtc_compare_execution_index = 0
+    rospy.loginfo(f"RTC compare output: Enabled -> {task_dir} ({mode_suffix})")
+
+
+def record_rtc_compare_interval(args, kind, label, start_s, end_s, metadata=None, start_wall_ns=None, end_wall_ns=None):
+    if not getattr(args, 'rtc_compare_record', False):
+        return
+    if not getattr(args, 'rtc_compare_task_dir', None):
+        return
+    interval = {
+        'mode': args.rtc_compare_mode_name,
+        'kind': kind,
+        'label': label,
+        'start_s': float(start_s),
+        'end_s': float(end_s),
+        'metadata': metadata or {},
+    }
+    if start_wall_ns is not None and end_wall_ns is not None:
+        interval['start_wall_ns'] = int(start_wall_ns)
+        interval['end_wall_ns'] = int(end_wall_ns)
+    args.rtc_compare_intervals.append(interval)
+
+
+def record_rtc_compare_action_fetch(args, start_s, end_s, metadata=None, start_wall_ns=None, end_wall_ns=None):
+    index = getattr(args, 'rtc_compare_action_fetch_index', 0)
+    args.rtc_compare_action_fetch_index = index + 1
+    label_prefix = 'rtc' if args.client_mode == 'rtc' else 'chunk'
+    record_rtc_compare_interval(
+        args,
+        'action_fetch',
+        f'{label_prefix}_{index}',
+        start_s,
+        end_s,
+        metadata,
+        start_wall_ns=start_wall_ns,
+        end_wall_ns=end_wall_ns,
+    )
+
+
+def get_server_timing_metadata(result):
+    if not isinstance(result, dict):
+        return None
+    timing = result.get('_timing') or result.get('server_timing')
+    if isinstance(timing, dict):
+        return timing
+    return None
+
+
+def record_rtc_compare_execution(args, start_s, end_s, step_index, start_wall_ns=None, end_wall_ns=None):
+    index = getattr(args, 'rtc_compare_execution_index', 0)
+    args.rtc_compare_execution_index = index + 1
+    metadata = {
+        'global_action_index': int(step_index),
+        'control_tick_index': index,
+        'source': 'new_rtc_chunk' if args.client_mode == 'rtc' else 'new_non_rtc_chunk',
+    }
+    if args.client_mode == 'rtc':
+        metadata['estimated_delay_steps'] = getattr(args, 'rtc_compare_last_delay_steps', 0)
+    record_rtc_compare_interval(
+        args,
+        'execution',
+        f'action_{index}',
+        start_s,
+        end_s,
+        metadata,
+        start_wall_ns=start_wall_ns,
+        end_wall_ns=end_wall_ns,
+    )
+
+
+def save_rtc_compare_frames(args, image_dict):
+    # RTC compare image recording must use RosOperator.start_recording(), the
+    # same 60Hz background recording thread as --record_video. Keeping a
+    # synchronous fallback here makes the frame count match control steps and
+    # hides recording setup bugs, so this path is intentionally disabled.
+    return
+
+
+def _interval_duration(interval):
+    return float(interval['end_s']) - float(interval['start_s'])
+
+
+def _interval_to_json(interval):
+    data = {
+        'mode': interval['mode'],
+        'kind': interval['kind'],
+        'label': interval['label'],
+        'start_s': round(float(interval['start_s']), 6),
+        'end_s': round(float(interval['end_s']), 6),
+        'duration_s': round(_interval_duration(interval), 6),
+    }
+    if 'start_wall_ns' in interval and 'end_wall_ns' in interval:
+        data['start_wall_ns'] = int(interval['start_wall_ns'])
+        data['end_wall_ns'] = int(interval['end_wall_ns'])
+    if interval.get('metadata'):
+        data['metadata'] = interval['metadata']
+    return data
+
+
+def _relative_intervals(intervals):
+    if not intervals:
+        return []
+    min_start_s = min(float(interval['start_s']) for interval in intervals)
+    wall_starts = []
+    for interval in intervals:
+        if 'start_wall_ns' in interval:
+            wall_starts.append(int(interval['start_wall_ns']))
+        server_timing = (interval.get('metadata') or {}).get('server_timing')
+        if isinstance(server_timing, dict) and server_timing.get('server_model_start_wall_ns') is not None:
+            wall_starts.append(int(server_timing['server_model_start_wall_ns']))
+    min_wall_ns = min(wall_starts) if wall_starts else None
+    return [
+        {
+            **interval,
+            'start_s': float(interval['start_s']) - min_start_s,
+            'end_s': float(interval['end_s']) - min_start_s,
+            **(
+                {
+                    'start_wall_rel_s': (int(interval['start_wall_ns']) - min_wall_ns) / 1e9,
+                    'end_wall_rel_s': (int(interval['end_wall_ns']) - min_wall_ns) / 1e9,
+                }
+                if min_wall_ns is not None and 'start_wall_ns' in interval and 'end_wall_ns' in interval
+                else {}
+            ),
+        }
+        for interval in intervals
+    ]
+
+
+def _duration_summary(intervals, kind):
+    durations = [_interval_duration(interval) for interval in intervals if interval['kind'] == kind]
+    if not durations:
+        return {'count': 0, 'mean_s': 0.0, 'p50_s': 0.0, 'max_s': 0.0}
+    return {
+        'count': len(durations),
+        'mean_s': round(statistics.mean(durations), 6),
+        'p50_s': round(statistics.median(durations), 6),
+        'max_s': round(max(durations), 6),
+    }
+
+
+def _execution_gaps(intervals):
+    executions = sorted(
+        (interval for interval in intervals if interval['kind'] == 'execution'),
+        key=lambda interval: interval['start_s'],
+    )
+    gaps = []
+    for left, right in zip(executions, executions[1:]):
+        gap = float(right['start_s']) - float(left['end_s'])
+        if gap > 1e-4:
+            gaps.append(gap)
+    return gaps
+
+
+def _rtc_compare_summary(intervals):
+    gaps = _execution_gaps(intervals)
+    return {
+        'action_fetch': _duration_summary(intervals, 'action_fetch'),
+        'execution': _duration_summary(intervals, 'execution'),
+        'execution_gap_count': len(gaps),
+        'max_execution_gap_s': round(max(gaps), 6) if gaps else 0.0,
+        'mean_execution_gap_s': round(statistics.mean(gaps), 6) if gaps else 0.0,
+    }
+
+
+def _format_ms(seconds):
+    return f'{seconds * 1000:.1f} ms'
+
+
+def _rtc_compare_timeline_duration(args, intervals):
+    if getattr(args, 'max_publish_step', 0) and args.max_publish_step > 0 and getattr(args, 'publish_rate', 0) > 0:
+        return float(math.ceil(float(args.max_publish_step) / float(args.publish_rate)))
+    return max((float(interval['end_s']) for interval in intervals), default=0.0)
+
+
+def _wall_clock_timeline_intervals(intervals):
+    plot_intervals = []
+    for interval in intervals:
+        metadata = interval.get('metadata') or {}
+        server_timing = metadata.get('server_timing')
+        if interval.get('kind') == 'action_fetch' and isinstance(server_timing, dict):
+            start_ns = server_timing.get('server_model_start_wall_ns')
+            end_ns = server_timing.get('server_model_end_wall_ns')
+            if start_ns is not None and end_ns is not None:
+                plot_intervals.append({
+                    **interval,
+                    'kind': 'inference',
+                    'start_wall_ns': int(start_ns),
+                    'end_wall_ns': int(end_ns),
+                })
+                continue
+        if interval.get('kind') == 'action_fetch' and 'start_wall_ns' in interval and 'end_wall_ns' in interval:
+            fallback_metadata = dict(metadata)
+            fallback_metadata.setdefault('timing_source', 'client_action_fetch_fallback')
+            plot_intervals.append({
+                **interval,
+                'kind': 'inference',
+                'metadata': fallback_metadata,
+                'start_wall_ns': int(interval['start_wall_ns']),
+                'end_wall_ns': int(interval['end_wall_ns']),
+            })
+        elif interval.get('kind') == 'execution' and 'start_wall_ns' in interval and 'end_wall_ns' in interval:
+            plot_intervals.append(interval)
+
+    if not plot_intervals:
+        return []
+    min_wall_ns = min(int(interval['start_wall_ns']) for interval in plot_intervals)
+    return [
+        {
+            **interval,
+            'start_s': (int(interval['start_wall_ns']) - min_wall_ns) / 1e9,
+            'end_s': (int(interval['end_wall_ns']) - min_wall_ns) / 1e9,
+        }
+        for interval in plot_intervals
+    ]
+
+
+def _server_timing_intervals(intervals):
+    derived = []
+    for interval in intervals:
+        if interval.get('kind') != 'action_fetch':
+            continue
+        metadata = interval.get('metadata') or {}
+        server_timing = metadata.get('server_timing')
+        if not isinstance(server_timing, dict):
+            continue
+
+        server_total_s = float(server_timing.get('server_total_ms', 0.0)) / 1000.0
+        server_preprocess_s = float(server_timing.get('server_preprocess_ms', 0.0)) / 1000.0
+        server_model_s = float(server_timing.get('server_model_forward_ms', 0.0)) / 1000.0
+        if server_total_s <= 0.0:
+            continue
+
+        # Server and client clocks are not shared. Align server timing to the
+        # client-observed response end for visualization only.
+        server_total_end = float(interval['end_s'])
+        server_total_start = max(float(interval['start_s']), server_total_end - server_total_s)
+        server_model_start = server_total_start + max(server_preprocess_s, 0.0)
+        server_model_end = server_model_start + max(server_model_s, 0.0)
+        server_model_end = min(server_model_end, server_total_end)
+
+        derived.append({**interval, 'kind': 'server_total', 'start_s': server_total_start, 'end_s': server_total_end})
+        if server_model_end > server_model_start:
+            derived.append({**interval, 'kind': 'server_model_forward', 'start_s': server_model_start, 'end_s': server_model_end})
+    return derived
+
+
+def _plot_single_timeline(intervals, output_path, title, duration_limit_s=None):
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
+    plot_intervals = _wall_clock_timeline_intervals(intervals) or intervals
+    duration_s = duration_limit_s if duration_limit_s is not None else max(
+        (interval['end_s'] for interval in plot_intervals),
+        default=0.0,
+    )
+    fig, ax = plt.subplots(figsize=(13, 3.8))
+    lanes = [
+        ('inference', 11, 'tab:red'),
+        ('execution', 2, 'tab:blue'),
+    ]
+    for kind, y_pos, color in lanes:
+        bars = [
+            (interval['start_s'], max(_interval_duration(interval), 1e-4))
+            for interval in plot_intervals
+            if interval['kind'] == kind
+        ]
+        ax.broken_barh(bars, (y_pos, 5.0), facecolors=color, edgecolors='none', alpha=0.85)
+    ax.set_yticks([13.5, 4.5])
+    ax.set_yticklabels(['Inference', 'Execution'])
+    ax.set_xlabel('time (s)')
+    ax.set_xlim(0, max(duration_s, 1e-3))
+    ax.set_ylim(0, 18)
+    ax.set_title(title)
+    ax.grid(axis='x', linestyle='--', alpha=0.35)
+    handles = [
+        mpatches.Patch(color='tab:red', label='Inference'),
+        mpatches.Patch(color='tab:blue', label='Execution'),
+    ]
+    ax.legend(handles=handles, loc='upper right', frameon=False)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def _plot_comparison_timeline(non_rtc, rtc, output_path):
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
+    non_rtc_plot = list(non_rtc) + _server_timing_intervals(non_rtc)
+    rtc_plot = list(rtc) + _server_timing_intervals(rtc)
+    duration_s = max(
+        max((interval['end_s'] for interval in non_rtc_plot), default=0.0),
+        max((interval['end_s'] for interval in rtc_plot), default=0.0),
+        1e-3,
+    )
+    fig, ax = plt.subplots(figsize=(14, 8.0))
+    lanes = [
+        ('non_rtc', non_rtc_plot, 'action_fetch', 67, 'tab:red'),
+        ('non_rtc', non_rtc_plot, 'server_total', 58, 'tab:orange'),
+        ('non_rtc', non_rtc_plot, 'server_model_forward', 49, 'tab:purple'),
+        ('non_rtc', non_rtc_plot, 'execution', 40, 'tab:blue'),
+        ('rtc', rtc_plot, 'action_fetch', 29, 'tab:red'),
+        ('rtc', rtc_plot, 'server_total', 20, 'tab:orange'),
+        ('rtc', rtc_plot, 'server_model_forward', 11, 'tab:purple'),
+        ('rtc', rtc_plot, 'execution', 2, 'tab:green'),
+    ]
+    for _mode, intervals, kind, y_pos, color in lanes:
+        bars = [
+            (interval['start_s'], max(_interval_duration(interval), 1e-4))
+            for interval in intervals
+            if interval['kind'] == kind
+        ]
+        ax.broken_barh(bars, (y_pos, 5.0), facecolors=color, edgecolors='none', alpha=0.85)
+    ax.set_yticks([69.5, 60.5, 51.5, 42.5, 31.5, 22.5, 13.5, 4.5])
+    ax.set_yticklabels([
+        'Non-RTC action fetch',
+        'Non-RTC server total',
+        'Non-RTC server model forward',
+        'Non-RTC execution',
+        'RTC action fetch',
+        'RTC server total',
+        'RTC server model forward',
+        'RTC execution',
+    ])
+    ax.set_xlabel('time (s)')
+    ax.set_xlim(0, duration_s)
+    ax.set_ylim(0, 74)
+    ax.set_title('LIFT2 real robot RTC vs non-RTC timing comparison')
+    ax.grid(axis='x', linestyle='--', alpha=0.35)
+    handles = [
+        mpatches.Patch(color='tab:red', label='Action fetch'),
+        mpatches.Patch(color='tab:orange', label='Server total'),
+        mpatches.Patch(color='tab:purple', label='Server model forward'),
+        mpatches.Patch(color='tab:blue', label='Non-RTC execution'),
+        mpatches.Patch(color='tab:green', label='RTC execution'),
+    ]
+    ax.legend(handles=handles, loc='upper right', frameon=False)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def write_rtc_compare_mode_outputs(args):
+    if not getattr(args, 'rtc_compare_record', False) or not getattr(args, 'rtc_compare_task_dir', None):
+        return None
+
+    task_dir = Path(args.rtc_compare_task_dir)
+    suffix = args.rtc_compare_mode_suffix
+    intervals = _relative_intervals(args.rtc_compare_intervals)
+    summary = _rtc_compare_summary(intervals)
+    payload = {
+        'config': {
+            'task': get_rtc_compare_task_name(args),
+            'client_mode': args.client_mode,
+            'publish_rate': args.publish_rate,
+            'execute_horizon': args.execute_horizon,
+            'action_chunk_size': args.action_chunk_size,
+            'rtc_action_horizon': args.rtc_action_horizon,
+            'rtc_execution_horizon': args.rtc_execution_horizon,
+            'rtc_inference_delay': args.rtc_inference_delay,
+        },
+        'summary': summary,
+        'intervals': [_interval_to_json(interval) for interval in intervals],
+    }
+    json_path = task_dir / f'action_timeline_{suffix}.json'
+    png_path = task_dir / f'action_timeline_{suffix}.png'
+    json_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+    try:
+        _plot_single_timeline(
+            intervals,
+            png_path,
+            f'LIFT2 client timeline ({suffix})',
+            duration_limit_s=_rtc_compare_timeline_duration(args, intervals),
+        )
+    except Exception as exc:
+        rospy.logwarn(f"[RTC Compare] Failed to plot {png_path}: {exc}")
+    rospy.loginfo(f"RTC compare timeline saved: {json_path}")
+    return json_path
+
+
+def write_rtc_compare_combined_outputs(args):
+    if not getattr(args, 'rtc_compare_record', False) or not getattr(args, 'rtc_compare_task_dir', None):
+        return
+
+    task_dir = Path(args.rtc_compare_task_dir)
+    non_rtc_path = task_dir / 'action_timeline_nortc.json'
+    rtc_path = task_dir / 'action_timeline_withrtc.json'
+    if not non_rtc_path.exists() or not rtc_path.exists():
+        return
+
+    non_rtc_payload = json.loads(non_rtc_path.read_text(encoding='utf-8'))
+    rtc_payload = json.loads(rtc_path.read_text(encoding='utf-8'))
+    non_rtc = non_rtc_payload.get('intervals', [])
+    rtc = rtc_payload.get('intervals', [])
+    combined = {
+        'summary': {
+            'non_rtc': non_rtc_payload.get('summary', _rtc_compare_summary(non_rtc)),
+            'rtc': rtc_payload.get('summary', _rtc_compare_summary(rtc)),
+        },
+        'non_rtc': non_rtc,
+        'rtc': rtc,
+    }
+    json_path = task_dir / 'rtc_vs_nortc_comparison.json'
+    png_path = task_dir / 'rtc_vs_nortc_comparison.png'
+    json_path.write_text(json.dumps(combined, indent=2), encoding='utf-8')
+    try:
+        _plot_comparison_timeline(non_rtc, rtc, png_path)
+    except Exception as exc:
+        rospy.logwarn(f"[RTC Compare] Failed to plot {png_path}: {exc}")
+    rospy.loginfo(f"RTC compare combined output saved: {json_path}")
+
+
+def finalize_rtc_compare_session(args):
+    if not getattr(args, 'rtc_compare_record', False):
+        return
+    write_rtc_compare_mode_outputs(args)
+    write_rtc_compare_combined_outputs(args)
+
+
+def finalize_video_outputs(args, interrupted=False):
+    tmp_frames_dir = getattr(args, 'recording_tmp_frames_dir', None)
+    tmp_videos_dir = getattr(args, 'recording_tmp_videos_dir', None)
+    if not tmp_frames_dir or not tmp_videos_dir or not os.path.isdir(tmp_frames_dir):
+        return
+
+    include_record_video = False
+    if getattr(args, 'record_video', False):
+        if interrupted:
+            rospy.loginfo("Run interrupted. Prompting whether to keep the recorded video session...")
+        try:
+            include_record_video = prompt_keep_recorded_video(
+                getattr(args, 'record_video_final_video_dir', None),
+                tmp_frames_dir,
+            )
+        except (EOFError, KeyboardInterrupt):
+            rospy.loginfo("Record video output discarded after interrupted prompt.")
+            include_record_video = False
+
+    copy_outputs = get_video_copy_outputs(args, include_record_video=include_record_video)
+    if getattr(args, 'record_video_final_video_dir', None) and include_record_video:
+        os.makedirs(args.record_video_final_video_dir, exist_ok=True)
+
+    start_video_transcode_worker(
+        tmp_frames_dir,
+        tmp_videos_dir,
+        RosOperator.CAMERA_FILE_NAMES,
+        RosOperator.CAMERA_PIC_DIR_NAMES,
+        copy_outputs=copy_outputs,
+    )
+    rospy.loginfo(
+        f"Video transcode started in background: frames={tmp_frames_dir} -> videos={tmp_videos_dir} "
+        f"(copy_targets={len(copy_outputs)})"
+    )
 
 
 def wait_for_debug_step_confirmation(step_index):
@@ -482,9 +1087,33 @@ class OpenPIClientModel:
 
         observation, current_eef = self._build_openpi_observation(obs, args)
 
+        t0_wall_ns = time.time_ns()
         t0 = time.perf_counter()
         result = self.client.infer(observation)
-        latency_ms = (time.perf_counter() - t0) * 1000
+        t1 = time.perf_counter()
+        t1_wall_ns = time.time_ns()
+        latency_ms = (t1 - t0) * 1000
+        delay_steps = self.client.get_estimated_delay_steps()
+        args.rtc_compare_last_delay_steps = delay_steps
+        server_timing = get_server_timing_metadata(result)
+        metadata = {
+            'request_type': 'rtc_control_tick_action_fetch',
+            'measurement_scope': 'client_observed_action_fetch_latency',
+            'client_roundtrip_ms': latency_ms,
+            'estimated_delay_steps': delay_steps,
+            'execution_horizon': args.rtc_execution_horizon,
+            'inference_delay': args.rtc_inference_delay,
+        }
+        if server_timing is not None:
+            metadata['server_timing'] = server_timing
+        record_rtc_compare_action_fetch(
+            args,
+            t0,
+            t1,
+            metadata,
+            start_wall_ns=t0_wall_ns,
+            end_wall_ns=t1_wall_ns,
+        )
 
         delta_action = self._sanitize_delta_action(result["actions"], args)
         # RTC returns one consecutive delta per tick. Accumulate on the last commanded
@@ -494,7 +1123,6 @@ class OpenPIClientModel:
         self.rtc_pred_eef = action_predict.copy()
 
         if args.log_latency or args.verbose:
-            delay_steps = self.client.get_estimated_delay_steps()
             rospy.loginfo(f"[RTC Latency] control tick: {latency_ms:.1f} ms, estimated delay={delay_steps} steps")
 
         if args.verbose:
@@ -569,9 +1197,30 @@ class OpenPIClientModel:
             observation, current_eef = self._build_openpi_observation(obs, args)
 
             # Call remote policy
+            t0_wall_ns = time.time_ns()
             t0 = time.perf_counter()
             result = self.client.infer(observation)
-            latency_ms = (time.perf_counter() - t0) * 1000
+            t1 = time.perf_counter()
+            t1_wall_ns = time.time_ns()
+            latency_ms = (t1 - t0) * 1000
+            server_timing = get_server_timing_metadata(result)
+            metadata = {
+                'request_type': 'non_rtc_chunk_action_fetch',
+                'measurement_scope': 'client_observed_action_fetch_latency',
+                'client_roundtrip_ms': latency_ms,
+                'execute_horizon': self.execute_horizon,
+                'action_chunk_size': self.action_chunk_size,
+            }
+            if server_timing is not None:
+                metadata['server_timing'] = server_timing
+            record_rtc_compare_action_fetch(
+                args,
+                t0,
+                t1,
+                metadata,
+                start_wall_ns=t0_wall_ns,
+                end_wall_ns=t1_wall_ns,
+            )
 
             if args.log_latency or args.verbose:
                 rospy.loginfo(f"[Latency] single inference: {latency_ms:.1f} ms")
@@ -649,7 +1298,10 @@ def get_action(args, config, ros_operator, policy):
     print_flag = True
     rate = rospy.Rate(args.publish_rate)
 
-    while not rospy.is_shutdown():
+    while True:
+        if rospy.is_shutdown():
+            raise KeyboardInterrupt("ROS shutdown while waiting for action")
+
         # Case 1: Action queue has remaining frames, use directly
         if len(policy.action_plan) > 0:
             action = policy.step(None, args)
@@ -675,6 +1327,7 @@ def get_action(args, config, ros_operator, policy):
             config['camera_names'][1]: img_left,
             config['camera_names'][2]: img_right
         }
+        save_rtc_compare_frames(args, image_dict)
         obs['images'] = image_dict
 
         if args.use_depth_image:
@@ -694,6 +1347,13 @@ def get_action(args, config, ros_operator, policy):
 
         return action
 
+    raise KeyboardInterrupt("Interrupted while waiting for action")
+
+
+def _sleep_control_period(rate_hz):
+    """Sleep for one control period without relying on rospy.Rate."""
+    time.sleep(1.0 / float(rate_hz))
+
 
 def move_to_init_pose(ros_operator, left_init, right_init, duration=3.0, rate_hz=15):
     """
@@ -709,10 +1369,13 @@ def move_to_init_pose(ros_operator, left_init, right_init, duration=3.0, rate_hz
     rospy.loginfo("Moving to initial pose...")
 
     # Wait for current pose
-    rate = rospy.Rate(rate_hz)
+    wait_timeout_s = max(duration, 5.0)
+    wait_deadline = time.time() + wait_timeout_s
     while len(ros_operator.arm_left_pose_deque) == 0 or len(ros_operator.arm_right_pose_deque) == 0:
+        if time.time() >= wait_deadline:
+            raise TimeoutError("Timed out waiting for arm state before homing")
         rospy.loginfo("Waiting for arm state data...")
-        rate.sleep()
+        _sleep_control_period(rate_hz)
 
     # Get current pose
     left_current_msg = ros_operator.arm_left_pose_deque[-1]
@@ -749,7 +1412,8 @@ def move_to_init_pose(ros_operator, left_init, right_init, duration=3.0, rate_hz
             progress = int(alpha * 100)
             rospy.loginfo(f"Progress: {progress}% ({step}/{total_steps})")
 
-        rate.sleep()
+        if step < total_steps:
+            _sleep_control_period(rate_hz)
 
     rospy.loginfo("Reached initial pose")
 
@@ -806,10 +1470,20 @@ def model_inference(args, config, ros_operator):
         run_infinite = max_publish_step <= 0
 
         # Start recording thread
-        if args.record_video:
+        if should_start_video_recording(args):
+            if not getattr(ros_operator, 'video_enabled', False):
+                rospy.logerr(
+                    "Video recording requested but RosOperator.video_enabled is False. "
+                    "Check pic_output_dir/video_output_dir setup before RosOperator initialization."
+                )
             ros_operator.start_recording()
 
-        while (run_infinite or t < max_publish_step) and not rospy.is_shutdown():
+        while run_infinite or t < max_publish_step:
+            if rospy.is_shutdown():
+                interrupted = True
+                rospy.loginfo("ROS shutdown detected, stopping inference loop")
+                break
+
             action = get_action(args, config, ros_operator, policy)
 
             duration = time.time() - start_time
@@ -842,13 +1516,24 @@ def model_inference(args, config, ros_operator):
                     break
 
             # Publish to ROS
+            execution_start_wall_ns = time.time_ns()
+            execution_start_s = time.perf_counter()
             ros_operator.eef_arm_publish(left_action, right_action)
 
             if t % 10 == 0:
                 rospy.loginfo(f"[Step {t:4d}] L_gripper={left_action[6]:.2f}, R_gripper={right_action[6]:.2f}")
 
+            step_index = t
             t += 1
             rate.sleep()
+            record_rtc_compare_execution(
+                args,
+                execution_start_s,
+                time.perf_counter(),
+                step_index,
+                start_wall_ns=execution_start_wall_ns,
+                end_wall_ns=time.time_ns(),
+            )
 
         if run_infinite:
             rospy.loginfo(f"Infinite mode interrupted, executed {t} steps")
@@ -861,7 +1546,6 @@ def model_inference(args, config, ros_operator):
         rospy.loginfo("Inference interrupted by user")
         return interrupted
     finally:
-        policy.close()
         if args.auto_init:
             rospy.loginfo("Returning to initial pose...")
             try:
@@ -874,6 +1558,7 @@ def model_inference(args, config, ros_operator):
                 )
             except Exception as exc:
                 rospy.logwarn(f"Failed to return to initial pose: {exc}")
+        policy.close()
 
 
 
@@ -989,6 +1674,10 @@ def get_arguments():
                         help='Debug mode: press Enter to execute each action step')
     parser.add_argument('--record_video', action='store_true', default=False,
                         help='Record three camera videos to ./video/{task}/{seq}')
+    parser.add_argument('--rtc_compare_output_dir', type=str, default='rtc_real_compare',
+                        help='Directory for real robot RTC/non-RTC comparison outputs')
+    parser.add_argument('--no_rtc_compare_record', action='store_false', dest='rtc_compare_record', default=True,
+                        help='Disable default RTC/non-RTC comparison image and timeline recording')
 
     # Gripper control
     parser.add_argument('--binarize_gripper', action='store_true', default=True,
@@ -1067,18 +1756,30 @@ def main():
     if args.task:
         rospy.loginfo(f"Task preset: {args.task}")
     rospy.loginfo(f"Language instruction: {args.language_instruction}")
-    if args.record_video:
-        args.pic_output_dir, args.video_output_dir = resolve_recording_output_dirs(args)
-        rospy.loginfo(f"Video recording: Enabled -> frames={args.pic_output_dir}, videos={args.video_output_dir}")
-    else:
-        args.pic_output_dir = None
-        args.video_output_dir = None
+    prepare_rtc_compare_output(args)
+    setup_recording_output_dirs(args)
+    setup_rtc_compare_recording_output(args)
+    rospy.loginfo(
+        "Video recording state: "
+        f"record_video={args.record_video}, "
+        f"rtc_compare_record={args.rtc_compare_record}, "
+        f"rtc_compare_recording_enabled={getattr(args, 'rtc_compare_recording_enabled', False)}, "
+        f"tmp_frames_dir={getattr(args, 'recording_tmp_frames_dir', None)}, "
+        f"tmp_videos_dir={getattr(args, 'recording_tmp_videos_dir', None)}, "
+        f"record_video_final_video_dir={getattr(args, 'record_video_final_video_dir', None)}"
+    )
     if args.debug:
         rospy.loginfo("** DEBUG MODE: Press Enter to execute each step **")
     rospy.loginfo("="*50)
 
     # Initialize ROS operator
     ros_operator = RosOperator(args)
+    if should_start_video_recording(args):
+        rospy.loginfo(
+            "Starting 60Hz background recording before inference loop: "
+            f"tmp_frames={getattr(args, 'recording_tmp_frames_dir', None)}"
+        )
+        ros_operator.start_recording()
 
     # Configuration
     config = {
@@ -1092,7 +1793,8 @@ def main():
         interrupted = model_inference(args, config, ros_operator)
     finally:
         ros_operator.close_video_writers()
-        finalize_recorded_video_session(args, interrupted=interrupted)
+        finalize_rtc_compare_session(args)
+        finalize_video_outputs(args, interrupted=interrupted)
 
 
 if __name__ == '__main__':

@@ -6,7 +6,9 @@ Handles sensor data collection and end-effector pose control for ARX R5 dual-arm
 """
 
 import os
+import queue
 import threading
+import time
 
 import cv2
 import rospy
@@ -101,6 +103,8 @@ class RosOperator:
         self.arm_right_cmd_publisher = None
 
         self.video_enabled = bool(getattr(self.args, 'video_output_dir', None))
+        self.camera_file_names = getattr(self.args, 'camera_file_names', None) or self.CAMERA_FILE_NAMES
+        self.camera_pic_dir_names = getattr(self.args, 'camera_pic_dir_names', None) or self.CAMERA_PIC_DIR_NAMES
         self.recorded_frame_count = 0
         self.recorded_frame_counts = {
             'head': 0,
@@ -113,6 +117,13 @@ class RosOperator:
         self.recording_active = False
         self.recording_stop_event = threading.Event()
         self.recording_lock = threading.Lock()
+        self.frame_save_queue = queue.Queue(maxsize=240)
+        self.frame_save_thread = None
+        self.frame_save_active = False
+        self.frame_save_stop_event = threading.Event()
+        self.recording_loop_hz = 60.0
+        self.recording_started_wall_s = None
+        self.recording_last_status_log_s = 0.0
 
         # Initialize ROS topics
         self.init_ros()
@@ -159,22 +170,25 @@ class RosOperator:
         os.makedirs(self.args.video_output_dir, exist_ok=True)
 
         self.recorded_frame_count = 0
-        for camera_name in self.CAMERA_FILE_NAMES:
+        for camera_name in self.camera_file_names:
             pic_dir = self._get_camera_pic_dir(camera_name)
             os.makedirs(pic_dir, exist_ok=True)
             self.recorded_frame_counts[camera_name] = 0
             rospy.loginfo(f"[Video] Ready to collect frames for {camera_name} -> {pic_dir}")
 
     def _get_camera_pic_dir(self, camera_name):
-        return os.path.join(self.args.pic_output_dir, self.CAMERA_PIC_DIR_NAMES[camera_name])
+        return os.path.join(self.args.pic_output_dir, self.camera_pic_dir_names[camera_name])
 
     def start_recording(self):
         """Start the recording thread"""
         if not self.video_enabled or self.recording_active:
             return
 
+        self._start_frame_save_worker()
         self.recording_active = True
         self.recording_stop_event.clear()
+        self.recording_started_wall_s = time.time()
+        self.recording_last_status_log_s = self.recording_started_wall_s
         self.recording_thread = threading.Thread(target=self._recording_loop, daemon=True)
         self.recording_thread.start()
         rospy.loginfo("[Recording] Started recording thread at 60Hz")
@@ -188,31 +202,118 @@ class RosOperator:
         if self.recording_thread:
             self.recording_thread.join(timeout=5.0)
         self.recording_active = False
-        rospy.loginfo(f"[Recording] Stopped. Recorded frames: head={self.recorded_frame_counts['head']}, "
-                     f"left={self.recorded_frame_counts['left_wrist']}, right={self.recorded_frame_counts['right_wrist']}")
+        self._stop_frame_save_worker()
+        elapsed_s = max(time.time() - (self.recording_started_wall_s or time.time()), 1e-6)
+        effective_hz = self.recorded_frame_count / elapsed_s
+        rospy.loginfo(
+            f"[Recording] Stopped. Recorded frames: head={self.recorded_frame_counts['head']}, "
+            f"left={self.recorded_frame_counts['left_wrist']}, right={self.recorded_frame_counts['right_wrist']}, "
+            f"elapsed={elapsed_s:.2f}s, effective_save_hz={effective_hz:.2f}"
+        )
+
+    def _start_frame_save_worker(self):
+        if self.frame_save_active:
+            return
+        self.frame_save_active = True
+        self.frame_save_stop_event.clear()
+        self.frame_save_thread = threading.Thread(target=self._frame_save_worker_loop, daemon=True)
+        self.frame_save_thread.start()
+
+    def _stop_frame_save_worker(self):
+        if not self.frame_save_active:
+            return
+        self.frame_save_stop_event.set()
+        try:
+            self.frame_save_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self.frame_save_thread:
+            self.frame_save_thread.join(timeout=10.0)
+        self.frame_save_active = False
+        while not self.frame_save_queue.empty():
+            try:
+                self.frame_save_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _frame_save_worker_loop(self):
+        while not self.frame_save_stop_event.is_set() and not rospy.is_shutdown():
+            try:
+                item = self.frame_save_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            frame_index, frames = item
+            try:
+                self._write_frame_set_to_disk(frame_index, frames)
+            except Exception as exc:
+                rospy.logwarn(f"[Recording] Async frame save error at index {frame_index}: {exc}")
+
+    def _write_frame_set_to_disk(self, frame_index, frames):
+        for camera_name, frame_bgr in frames.items():
+            frame_path = os.path.join(self._get_camera_pic_dir(camera_name), f"{frame_index:06d}.jpg")
+            if not cv2.imwrite(frame_path, frame_bgr):
+                raise RuntimeError(f"Failed to save frame to {frame_path}")
+
+        with self.recording_lock:
+            self.recorded_frame_count = frame_index + 1
+            for camera_name in self.recorded_frame_counts:
+                self.recorded_frame_counts[camera_name] = self.recorded_frame_count
+
+    def _maybe_log_recording_status(self):
+        now_s = time.time()
+        if now_s - self.recording_last_status_log_s < 5.0:
+            return
+        self.recording_last_status_log_s = now_s
+        elapsed_s = max(now_s - (self.recording_started_wall_s or now_s), 1e-6)
+        effective_hz = self.recorded_frame_count / elapsed_s
+        queue_depth = self.frame_save_queue.qsize()
+        rospy.loginfo(
+            f"[Recording] status: saved_frames={self.recorded_frame_count}, "
+            f"elapsed={elapsed_s:.1f}s, effective_save_hz={effective_hz:.2f}, "
+            f"save_queue_depth={queue_depth}"
+        )
 
     def _recording_loop(self):
         """Recording thread main loop - runs at 60Hz independently"""
-        rate = rospy.Rate(60)  # 60Hz recording
+        rate = rospy.Rate(self.recording_loop_hz)
 
         while not self.recording_stop_event.is_set() and not rospy.is_shutdown():
-            # Check if all camera deques have data
             if (len(self.img_front_deque) > 0 and
                 len(self.img_left_deque) > 0 and
                 len(self.img_right_deque) > 0):
 
                 try:
-                    # Get latest frames from deque (non-blocking)
                     img_front = self.bridge.imgmsg_to_cv2(self.img_front_deque[-1], 'passthrough')
                     img_left = self.bridge.imgmsg_to_cv2(self.img_left_deque[-1], 'passthrough')
                     img_right = self.bridge.imgmsg_to_cv2(self.img_right_deque[-1], 'passthrough')
-
-                    # Save frames
-                    self.save_current_frames_to_disk(img_front, img_left, img_right)
+                    self._enqueue_current_frames(img_front, img_left, img_right)
                 except Exception as e:
-                    rospy.logwarn(f"[Recording] Frame save error: {e}")
+                    rospy.logwarn(f"[Recording] Frame capture error: {e}")
 
+            self._maybe_log_recording_status()
             rate.sleep()
+
+    def _enqueue_current_frames(self, img_front, img_left, img_right):
+        if not self.video_enabled:
+            return
+        if img_front is None or img_left is None or img_right is None:
+            return
+
+        with self.recording_lock:
+            frame_index = self.recorded_frame_count + self.frame_save_queue.qsize()
+
+        frames = {
+            'head': cv2.cvtColor(img_front, cv2.COLOR_RGB2BGR),
+            'left_wrist': cv2.cvtColor(img_left, cv2.COLOR_RGB2BGR),
+            'right_wrist': cv2.cvtColor(img_right, cv2.COLOR_RGB2BGR),
+        }
+
+        try:
+            self.frame_save_queue.put_nowait((frame_index, frames))
+        except queue.Full:
+            rospy.logwarn_throttle(5.0, "[Recording] Frame save queue full; dropping frame to preserve 60Hz capture")
 
     def save_current_frames_to_disk(self, img_front, img_left, img_right):
         """Save one synchronized frame set to disk."""
@@ -222,22 +323,14 @@ class RosOperator:
             return
 
         frames = {
-            'head': img_front,
-            'left_wrist': img_left,
-            'right_wrist': img_right,
+            'head': cv2.cvtColor(img_front, cv2.COLOR_RGB2BGR),
+            'left_wrist': cv2.cvtColor(img_left, cv2.COLOR_RGB2BGR),
+            'right_wrist': cv2.cvtColor(img_right, cv2.COLOR_RGB2BGR),
         }
 
         with self.recording_lock:
             frame_index = self.recorded_frame_count
-            for camera_name, frame in frames.items():
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                frame_path = os.path.join(self._get_camera_pic_dir(camera_name), f"{frame_index:06d}.jpg")
-                if not cv2.imwrite(frame_path, frame_bgr):
-                    raise RuntimeError(f"Failed to save frame to {frame_path}")
-
-            self.recorded_frame_count += 1
-            for camera_name in self.recorded_frame_counts:
-                self.recorded_frame_counts[camera_name] = self.recorded_frame_count
+        self._write_frame_set_to_disk(frame_index, frames)
 
     def save_recorded_videos(self):
         if not self.video_enabled:
@@ -246,8 +339,8 @@ class RosOperator:
         save_recorded_videos_from_frames(
             self.args.pic_output_dir,
             self.args.video_output_dir,
-            self.CAMERA_FILE_NAMES,
-            self.CAMERA_PIC_DIR_NAMES,
+            self.camera_file_names,
+            self.camera_pic_dir_names,
             fps=60.0,
             log_fn=rospy.loginfo,
         )

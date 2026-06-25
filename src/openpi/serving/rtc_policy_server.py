@@ -86,8 +86,11 @@ class RTCPolicyServer:
         prev_total_time = None
         while True:
             try:
-                start_time = time.monotonic()
-                request = msgpack_numpy.unpackb(await websocket.recv())
+                raw_request = await websocket.recv()
+                request_received_wall_ns = time.time_ns()
+                request_received_time = time.monotonic()
+                request_id = self._step_count
+                request = msgpack_numpy.unpackb(raw_request)
                 obs, rtc_context = self._parse_request(request)
 
                 if self._fix_state_mask is not None and "observation.state" in obs:
@@ -100,20 +103,39 @@ class RTCPolicyServer:
                 if self._debug_print and self._step_count % self._debug_interval == 0:
                     self._print_debug_input(obs, rtc_context)
 
-                infer_time = time.monotonic()
+                infer_start_wall_ns = time.time_ns()
+                infer_start_time = time.monotonic()
                 action = self._policy.infer(obs, rtc_context=rtc_context, return_model_actions=True)
-                infer_time = time.monotonic() - infer_time
+                infer_end_time = time.monotonic()
+                infer_end_wall_ns = time.time_ns()
+                infer_time = infer_end_time - infer_start_time
 
                 if self._debug_print and self._step_count % self._debug_interval == 0:
                     self._print_debug_output(action, infer_time)
 
-                self._step_count += 1
-                action["server_timing"] = {"infer_ms": infer_time * 1000}
+                response_ready_time = time.monotonic()
+                response_ready_wall_ns = time.time_ns()
+                timing = {
+                    "request_id": request_id,
+                    "server_request_received_wall_ns": request_received_wall_ns,
+                    "server_model_start_wall_ns": infer_start_wall_ns,
+                    "server_model_end_wall_ns": infer_end_wall_ns,
+                    "server_response_ready_wall_ns": response_ready_wall_ns,
+                    "server_preprocess_ms": (infer_start_time - request_received_time) * 1000,
+                    "server_model_forward_ms": infer_time * 1000,
+                    "server_postprocess_ms": (response_ready_time - infer_end_time) * 1000,
+                    "server_total_ms": (response_ready_time - request_received_time) * 1000,
+                    "infer_ms": infer_time * 1000,
+                }
                 if prev_total_time is not None:
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    timing["prev_total_ms"] = prev_total_time * 1000
+
+                self._step_count += 1
+                action["_timing"] = timing
+                action["server_timing"] = timing
 
                 await websocket.send(packer.pack(action))
-                prev_total_time = time.monotonic() - start_time
+                prev_total_time = time.monotonic() - request_received_time
 
             except websockets.ConnectionClosed:
                 logger.info("RTC connection from %s closed", websocket.remote_address)
