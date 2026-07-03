@@ -61,14 +61,23 @@ roslaunch realsense2_camera rs_multiple_devices.launch
 ```bash
 cd /path/to/openpi/openpi-on-LIFT2
 
-# 默认 profile：30Hz
+# 默认 profile：30Hz 直接发布
 ./launch.sh --task tube --verbose
 
-# 上采样 profile：60Hz
-./launch.sh --profile upsample --task tube --verbose
+# 平滑高频执行：policy/主循环 30Hz，按 policy waypoint 轨迹语义播放到 90Hz EEF command
+./launch.sh --fast --task tube --verbose
 
-# 覆盖 profile 中的 host
-./launch.sh --profile upsample --host <服务器IP> --task tube --verbose
+# 覆盖 profile 中的 host，并启用平滑高频执行
+./launch.sh --fast --host <服务器IP> --task tube --verbose
+
+# 只保存普通三路相机视频
+./launch.sh --fast --task tube --record_video
+
+# 只保存 RTC/non-RTC compare 输出
+./launch.sh --fast --task tube --compare
+
+# 同时保存普通视频和 compare 输出
+./launch.sh --fast --task tube --record_video --compare
 ```
 
 ## 无机器人测试

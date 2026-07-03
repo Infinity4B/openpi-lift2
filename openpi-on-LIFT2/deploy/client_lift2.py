@@ -34,6 +34,7 @@ from openpi_client import websocket_client_policy
 
 from deploy.utils.rotation import pose_to_eef, apply_eef_delta, denormalize_gripper
 from deploy.utils.rosoperator import RosOperator
+from deploy.utils.eef_action_executor import EEFInterpolatingExecutor, EEFTrajectoryExecutor
 
 CAMERA_NAMES = ['head', 'left_wrist', 'right_wrist']
 
@@ -54,8 +55,6 @@ LEGACY_RUNTIME_DEFAULTS = {
     'publish_rate': 30,
     'execute_horizon': 30,
     'action_chunk_size': 30,
-    'source_hz': 30,
-    'target_hz': 30,
     'max_publish_step': DEFAULT_MAX_PUBLISH_STEP,
 }
 PROFILE_OPTIONAL_KEYS = (
@@ -74,8 +73,6 @@ PROFILE_VALUE_CASTERS = {
     'publish_rate': int,
     'execute_horizon': int,
     'action_chunk_size': int,
-    'source_hz': int,
-    'target_hz': int,
     'rtc_action_horizon': int,
     'rtc_execution_horizon': int,
     'rtc_inference_delay': int,
@@ -89,8 +86,6 @@ PROFILE_REQUIRED_KEYS = (
     'publish_rate',
     'execute_horizon',
     'action_chunk_size',
-    'source_hz',
-    'target_hz',
 )
 PRESET_TASK_INSTRUCTIONS = {
     'tube': 'Transfer the test tube from the right rack to the left rack.',
@@ -172,7 +167,23 @@ def finalize_runtime_args(args):
     if args.client_mode not in ('standard', 'rtc'):
         raise ValueError(f"client_mode must be 'standard' or 'rtc', got {args.client_mode!r}")
 
-    args.enable_upsample = args.enable_upsample or args.target_hz != args.source_hz
+    if not (0.0 < args.smooth_alpha <= 1.0):
+        raise ValueError(
+            "smooth_alpha must be in (0, 1], "
+            f"got {args.smooth_alpha}"
+        )
+
+    if args.fast:
+        args.enable_inference_executor = True
+    if args.executor_strategy not in ('trajectory_buffer', 'legacy_interpolate'):
+        raise ValueError(
+            "executor_strategy must be 'trajectory_buffer' or 'legacy_interpolate', "
+            f"got {args.executor_strategy!r}"
+        )
+    if args.executor_rate_hz <= 0:
+        raise ValueError(f"executor_rate_hz must be positive, got {args.executor_rate_hz}")
+    if args.executor_max_queue_size <= 0:
+        raise ValueError(f"executor_max_queue_size must be positive, got {args.executor_max_queue_size}")
     if args.rtc_action_horizon is None:
         args.rtc_action_horizon = args.action_chunk_size
     if args.rtc_execution_horizon is None:
@@ -185,6 +196,15 @@ def finalize_runtime_args(args):
         args.rtc_prefix_attention_schedule = 'exp'
     if args.rtc_max_guidance_weight is None:
         args.rtc_max_guidance_weight = 10.0
+    if args.rtc_committed_prefix is None:
+        args.rtc_committed_prefix = min(
+            args.rtc_execution_horizon,
+            max(1, args.rtc_inference_delay + 1),
+        )
+    else:
+        if args.rtc_committed_prefix <= 0:
+            raise ValueError(f"rtc_committed_prefix must be positive, got {args.rtc_committed_prefix}")
+        args.rtc_committed_prefix = min(args.rtc_committed_prefix, args.rtc_execution_horizon)
     args.language_instruction = resolve_language_instruction(args)
     return args
 
@@ -207,11 +227,10 @@ def format_launcher_summary(args):
         f"Execute Horizon: {args.execute_horizon} frames",
         f"Action Chunk Size: {args.action_chunk_size} frames",
         f"Max Steps: {'Infinite' if args.max_publish_step <= 0 else args.max_publish_step}",
-        (
-            'Action Upsampling: '
-            + ('Enabled' if args.enable_upsample else 'Disabled')
-            + f" ({args.source_hz}Hz -> {args.target_hz}Hz)"
-        ),
+        'Inference Executor: '
+        + ('Enabled' if args.enable_inference_executor else 'Disabled')
+        + f" (policy {args.publish_rate}Hz -> executor {args.executor_rate_hz:.1f}Hz)",
+        f"Executor Strategy: {args.executor_strategy}",
     ])
 
     if args.client_mode == 'rtc':
@@ -219,6 +238,7 @@ def format_launcher_summary(args):
             f"RTC Action Horizon: {args.rtc_action_horizon} frames",
             f"RTC Execution Horizon: {args.rtc_execution_horizon} frames",
             f"RTC Inference Delay: {args.rtc_inference_delay} frames",
+            f"RTC Committed Prefix: {args.rtc_committed_prefix} frames",
             f"RTC Control Period: {args.rtc_control_period_s:.4f} s",
             f"RTC Prefix Attention: {args.rtc_prefix_attention_schedule}, weight={args.rtc_max_guidance_weight}",
         ])
@@ -235,7 +255,7 @@ def format_launcher_summary(args):
     if args.rtc_compare_record:
         lines.append(
             "RTC Compare Recording: ON "
-            f"(dir -> {args.rtc_compare_output_dir}/{args.task or 'custom'}, "
+            f"(dir -> {args.rtc_compare_output_dir}/{get_rtc_compare_task_name(args)}, "
             f"suffix -> _{get_rtc_compare_mode_suffix(args.client_mode)})"
         )
     if args.debug:
@@ -428,7 +448,10 @@ def link_recorded_frames_to_rtc_compare(args):
 
 
 def get_rtc_compare_task_name(args):
-    return args.task if args.task else 'custom'
+    task_name = args.task if args.task else 'custom'
+    if getattr(args, 'enable_inference_executor', False):
+        return f'{task_name}_fast'
+    return task_name
 
 
 def get_rtc_compare_mode_suffix(client_mode):
@@ -837,6 +860,10 @@ def write_rtc_compare_mode_outputs(args):
             'publish_rate': args.publish_rate,
             'execute_horizon': args.execute_horizon,
             'action_chunk_size': args.action_chunk_size,
+            'enable_inference_executor': args.enable_inference_executor,
+            'executor_rate_hz': args.executor_rate_hz,
+            'executor_interpolation': args.executor_interpolation,
+            'executor_gripper_mode': args.executor_gripper_mode,
             'rtc_action_horizon': args.rtc_action_horizon,
             'rtc_execution_horizon': args.rtc_execution_horizon,
             'rtc_inference_delay': args.rtc_inference_delay,
@@ -954,7 +981,7 @@ class OpenPIClientModel:
     """OpenPI Inference Client for EEF Delta Control"""
 
     def __init__(self, host, port, execute_horizon=30,
-                 enable_upsample=False, action_chunk_size=30, target_hz=30, source_hz=30,
+                 action_chunk_size=30,
                  client_mode='standard', rtc_action_horizon=None, rtc_execution_horizon=None,
                  rtc_inference_delay=0, rtc_control_period_s=1.0 / 30.0,
                  rtc_prefix_attention_schedule='exp', rtc_max_guidance_weight=10.0):
@@ -963,10 +990,7 @@ class OpenPIClientModel:
             host: Policy server host
             port: Policy server port
             execute_horizon: Number of frames to execute per inference
-            enable_upsample: Enable action upsampling (30Hz -> 60Hz)
-            action_chunk_size: Number of frames to use from prediction when upsampling
-            target_hz: Target control frequency for upsampling
-            source_hz: Source prediction frequency for upsampling
+            action_chunk_size: Number of frames used from each prediction chunk
             client_mode: standard uses local action queue; rtc returns one action per tick
         """
         self.client_mode = client_mode
@@ -990,10 +1014,7 @@ class OpenPIClientModel:
             )
         self.execute_horizon = execute_horizon
         self.executed_count = 0
-        self.enable_upsample = enable_upsample
         self.action_chunk_size = action_chunk_size
-        self.target_hz = target_hz
-        self.source_hz = source_hz
         self.reset()
         self.current_eef = None
 
@@ -1002,9 +1023,15 @@ class OpenPIClientModel:
         self.action_plan = collections.deque()
         self.executed_count = 0
         self.rtc_pred_eef = None
+        self.latest_executor_action_chunk = None
         if self.client_mode == 'rtc':
             self.client.reset()
         return None
+
+    def pop_latest_executor_action_chunk(self):
+        action_chunk = self.latest_executor_action_chunk
+        self.latest_executor_action_chunk = None
+        return action_chunk
 
     def close(self):
         if hasattr(self.client, 'close'):
@@ -1063,6 +1090,21 @@ class OpenPIClientModel:
             )
         return clipped_delta
 
+    def _smooth_delta_action(self, delta_action, args):
+        alpha = float(args.smooth_alpha)
+        if alpha >= 1.0:
+            return delta_action
+
+        smoothed_delta = delta_action.copy()
+        smoothed_delta[0:3] *= alpha
+        smoothed_delta[3:6] *= alpha
+        smoothed_delta[7:10] *= alpha
+        smoothed_delta[10:13] *= alpha
+        # Gripper values are postprocessed separately and must not be scaled here.
+        smoothed_delta[6] = delta_action[6]
+        smoothed_delta[13] = delta_action[13]
+        return smoothed_delta
+
     def _postprocess_gripper(self, action_predict, args):
         action_predict = np.array(action_predict).copy()
         left_gripper_norm = action_predict[6]
@@ -1116,6 +1158,7 @@ class OpenPIClientModel:
         )
 
         delta_action = self._sanitize_delta_action(result["actions"], args)
+        delta_action = self._smooth_delta_action(delta_action, args)
         # RTC returns one consecutive delta per tick. Accumulate on the last commanded
         # target, matching standard chunk execution and avoiding sensor-lag re-anchoring.
         base_eef = current_eef if self.rtc_pred_eef is None else self.rtc_pred_eef
@@ -1130,54 +1173,6 @@ class OpenPIClientModel:
             rospy.loginfo(f"[RTC] Target xyz: L={action_predict[:3]}, R={action_predict[7:10]}")
 
         return self._postprocess_gripper(action_predict, args)
-
-    def upsample_actions(self, actions):
-        """
-        Upsample action sequence from source_hz to target_hz using linear interpolation.
-        Gripper values (indices 6, 13) are not interpolated.
-
-        Args:
-            actions: List of (14,) action poses at source_hz
-
-        Returns:
-            upsampled_actions: List with interpolated frames at target_hz
-        """
-        if not self.enable_upsample or len(actions) == 0:
-            return actions
-
-        if self.target_hz % self.source_hz != 0:
-            rospy.logwarn(f"[Upsample] target_hz ({self.target_hz}) must be integer multiple of source_hz ({self.source_hz})")
-            return actions
-
-        ratio = self.target_hz // self.source_hz
-        if ratio == 1:
-            return actions  # No upsampling needed
-
-        actions = [np.array(a) for a in actions]
-        upsampled = []
-
-        for i in range(len(actions) - 1):
-            current_action = actions[i]
-            next_action = actions[i + 1]
-
-            # Add current frame
-            upsampled.append(current_action.copy())
-
-            # Interpolate intermediate frames
-            for j in range(1, ratio):
-                alpha = j / ratio
-                interpolated = current_action * (1 - alpha) + next_action * alpha
-
-                # Keep gripper values from next action (no interpolation)
-                interpolated[6] = next_action[6]    # Left gripper
-                interpolated[13] = next_action[13]  # Right gripper
-
-                upsampled.append(interpolated)
-
-        # Add last frame
-        upsampled.append(actions[-1].copy())
-
-        return upsampled
 
     def step(self, obs, args):
         """
@@ -1235,23 +1230,21 @@ class OpenPIClientModel:
             pred_eef = current_eef.copy()  # Start from current observation
             for delta_action in action_chunk:
                 delta_action = self._sanitize_delta_action(delta_action, args)
+                delta_action = self._smooth_delta_action(delta_action, args)
                 next_eef = apply_eef_delta(pred_eef, delta_action)  # Relative to previous prediction
                 absolute_actions.append(next_eef)
                 pred_eef = next_eef  # Update for next delta (accumulate)
 
-            # Limit to action_chunk_size if upsampling is enabled
-            if self.enable_upsample:
-                absolute_actions = absolute_actions[:self.action_chunk_size]
-
-            # Apply action upsampling if enabled
-            if self.enable_upsample:
-                original_count = len(absolute_actions)
-                absolute_actions = self.upsample_actions(absolute_actions)
-                if args.verbose:
-                    rospy.loginfo(f"[Upsample] {self.source_hz}Hz -> {self.target_hz}Hz: {original_count} frames -> {len(absolute_actions)} frames")
-
             # Cache actions to queue
             self.action_plan.extend(absolute_actions)
+            executor_actions = [
+                self._postprocess_gripper(action, args)
+                for action in absolute_actions[:self.execute_horizon]
+            ]
+            self.latest_executor_action_chunk = np.asarray(
+                executor_actions,
+                dtype=np.float32,
+            )
             self.executed_count = 0
 
             if args.verbose:
@@ -1431,10 +1424,7 @@ def model_inference(args, config, ros_operator):
         args.host,
         args.port,
         execute_horizon=args.execute_horizon,
-        enable_upsample=args.enable_upsample,
         action_chunk_size=args.action_chunk_size,
-        target_hz=args.target_hz,
-        source_hz=args.source_hz,
         client_mode=args.client_mode,
         rtc_action_horizon=args.rtc_action_horizon,
         rtc_execution_horizon=args.rtc_execution_horizon,
@@ -1445,6 +1435,25 @@ def model_inference(args, config, ros_operator):
     )
     max_publish_step = config['episode_len']
     interrupted = False
+    inference_executor = None
+    if args.enable_inference_executor:
+        executor_class = (
+            EEFTrajectoryExecutor
+            if args.executor_strategy == 'trajectory_buffer'
+            else EEFInterpolatingExecutor
+        )
+        inference_executor = executor_class(
+            ros_operator,
+            policy_rate_hz=args.publish_rate,
+            executor_rate_hz=args.executor_rate_hz,
+            interpolation=args.executor_interpolation,
+            gripper_mode=args.executor_gripper_mode,
+            max_queue_size=args.executor_max_queue_size,
+        )
+        rospy.loginfo(
+            f"Inference executor strategy: {args.executor_strategy} "
+            f"(rtc_committed_prefix={args.rtc_committed_prefix})"
+        )
 
     # Initial pose (normalized gripper [0, 1])
     left_init = args.left_init_pose if args.left_init_pose else [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -1457,6 +1466,9 @@ def model_inference(args, config, ros_operator):
                              duration=args.init_duration, rate_hz=args.publish_rate)
             if args.wait_after_init:
                 input("Press Enter to start inference...")
+
+        if inference_executor is not None:
+            inference_executor.start()
 
         # Main inference loop
         start_time = time.time()
@@ -1518,7 +1530,20 @@ def model_inference(args, config, ros_operator):
             # Publish to ROS
             execution_start_wall_ns = time.time_ns()
             execution_start_s = time.perf_counter()
-            ros_operator.eef_arm_publish(left_action, right_action)
+            if inference_executor is not None:
+                if args.executor_strategy == 'trajectory_buffer' and args.client_mode == 'rtc':
+                    inference_executor.merge_rtc_action(
+                        action,
+                        committed_prefix=args.rtc_committed_prefix,
+                    )
+                elif args.executor_strategy == 'trajectory_buffer':
+                    executor_action_chunk = policy.pop_latest_executor_action_chunk()
+                    if executor_action_chunk is not None:
+                        inference_executor.commit_actions(executor_action_chunk)
+                else:
+                    inference_executor.enqueue(action)
+            else:
+                ros_operator.eef_arm_publish(left_action, right_action)
 
             if t % 10 == 0:
                 rospy.loginfo(f"[Step {t:4d}] L_gripper={left_action[6]:.2f}, R_gripper={right_action[6]:.2f}")
@@ -1546,18 +1571,28 @@ def model_inference(args, config, ros_operator):
         rospy.loginfo("Inference interrupted by user")
         return interrupted
     finally:
+        executor_stopped = True
+        if inference_executor is not None:
+            normal_completion = not interrupted and not rospy.is_shutdown() and sys.exc_info()[0] is None
+            executor_stopped = inference_executor.stop(drain=normal_completion)
         if args.auto_init:
-            rospy.loginfo("Returning to initial pose...")
-            try:
-                move_to_init_pose(
-                    ros_operator,
-                    left_init,
-                    right_init,
-                    duration=args.init_duration,
-                    rate_hz=args.publish_rate,
+            if not executor_stopped:
+                rospy.logwarn(
+                    "Skipping return to initial pose because inference executor did not stop cleanly. "
+                    "This avoids competing command publishers."
                 )
-            except Exception as exc:
-                rospy.logwarn(f"Failed to return to initial pose: {exc}")
+            else:
+                rospy.loginfo("Returning to initial pose...")
+                try:
+                    move_to_init_pose(
+                        ros_operator,
+                        left_init,
+                        right_init,
+                        duration=args.init_duration,
+                        rate_hz=args.publish_rate,
+                    )
+                except Exception as exc:
+                    rospy.logwarn(f"Failed to return to initial pose: {exc}")
         policy.close()
 
 
@@ -1602,6 +1637,8 @@ def get_arguments():
                         help=f'Max per-step EEF xyz delta in meters (default: {DEFAULT_MAX_DELTA_XYZ})')
     parser.add_argument('--max_delta_rpy', type=float, default=DEFAULT_MAX_DELTA_RPY,
                         help=f'Max per-step EEF rpy delta in radians (default: {DEFAULT_MAX_DELTA_RPY})')
+    parser.add_argument('--smooth_alpha', type=float, default=1.0,
+                        help='Scale EEF xyz/rpy deltas before applying them; 1.0 disables smoothing, e.g. 0.2 moves 20%% of each predicted delta')
 
     # RTC client parameters
     parser.add_argument('--rtc_action_horizon', type=int, default=None,
@@ -1617,15 +1654,28 @@ def get_arguments():
     parser.add_argument('--rtc_max_guidance_weight', type=float, default=None,
                         help='RTC maximum prefix guidance weight')
 
-    # Action upsampling
-    parser.add_argument('--enable_upsample', action='store_true', default=False,
-                        help='Enable action upsampling')
+    # Inference-only smooth executor
+    parser.add_argument('--fast', action='store_true', default=False,
+                        help='Enable smooth high-rate inference executor (default: 30Hz policy -> 90Hz publish)')
+    parser.add_argument('--enable_inference_executor', action='store_true', default=False,
+                        help='Enable background EEF interpolation executor')
+    parser.add_argument('--executor_strategy', type=str, default='trajectory_buffer',
+                        choices=('trajectory_buffer', 'legacy_interpolate'),
+                        help='Executor strategy: trajectory_buffer preserves policy waypoint segments; legacy_interpolate uses last-command interpolation')
+    parser.add_argument('--executor_rate_hz', type=float, default=90.0,
+                        help='Background executor publish rate in Hz (default: 90)')
+    parser.add_argument('--executor_interpolation', type=str, default='linear',
+                        choices=('minimum_jerk', 'linear'),
+                        help='Executor interpolation method')
+    parser.add_argument('--executor_gripper_mode', type=str, default='passthrough',
+                        choices=('passthrough', 'interp'),
+                        help='Executor gripper handling mode')
+    parser.add_argument('--executor_max_queue_size', type=int, default=60,
+                        help='Maximum queued high-level EEF actions for the executor')
+    parser.add_argument('--rtc_committed_prefix', type=int, default=None,
+                        help='RTC executor committed prefix length; defaults to min(rtc_execution_horizon, rtc_inference_delay + 1)')
     parser.add_argument('--action_chunk_size', type=int, default=None,
-                        help='Number of frames to use from prediction when upsampling (default fallback: 30)')
-    parser.add_argument('--target_hz', type=int, default=None,
-                        help='Target control frequency for upsampling (default fallback: 30)')
-    parser.add_argument('--source_hz', type=int, default=None,
-                        help='Source prediction frequency for upsampling (default fallback: 30)')
+                        help='Number of frames to use from each prediction chunk (default fallback: 30)')
 
     # Initialization
     parser.add_argument('--auto_init', action='store_true', default=True,
@@ -1676,8 +1726,12 @@ def get_arguments():
                         help='Record three camera videos to ./video/{task}/{seq}')
     parser.add_argument('--rtc_compare_output_dir', type=str, default='rtc_real_compare',
                         help='Directory for real robot RTC/non-RTC comparison outputs')
-    parser.add_argument('--no_rtc_compare_record', action='store_false', dest='rtc_compare_record', default=True,
-                        help='Disable default RTC/non-RTC comparison image and timeline recording')
+    parser.add_argument('--compare', action='store_true', dest='rtc_compare_record', default=False,
+                        help='Enable RTC/non-RTC comparison timeline and MP4 recording')
+    parser.add_argument('--rtc_compare_record', action='store_true', dest='rtc_compare_record',
+                        help='Alias for --compare')
+    parser.add_argument('--no_rtc_compare_record', action='store_false', dest='rtc_compare_record',
+                        help='Disable RTC/non-RTC comparison image and timeline recording')
 
     # Gripper control
     parser.add_argument('--binarize_gripper', action='store_true', default=True,
@@ -1743,9 +1797,14 @@ def main():
             f"prefix_attention={args.rtc_prefix_attention_schedule}, "
             f"max_guidance_weight={args.rtc_max_guidance_weight}"
         )
-    rospy.loginfo(f"Action upsampling: {'Enabled' if args.enable_upsample else 'Disabled'}")
-    if args.enable_upsample:
-        rospy.loginfo(f"  {args.source_hz}Hz -> {args.target_hz}Hz (chunk size: {args.action_chunk_size})")
+    rospy.loginfo(
+        f"Inference executor: {'Enabled' if args.enable_inference_executor else 'Disabled'}"
+    )
+    if args.enable_inference_executor:
+        rospy.loginfo(
+            f"  policy {args.publish_rate}Hz -> executor {args.executor_rate_hz:.1f}Hz, "
+            f"interpolation={args.executor_interpolation}, gripper_mode={args.executor_gripper_mode}"
+        )
     rospy.loginfo(f"Auto initialization: {'Enabled' if args.auto_init else 'Disabled'}")
     if args.auto_init:
         rospy.loginfo(f"  Init duration: {args.init_duration}s")

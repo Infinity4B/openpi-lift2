@@ -57,7 +57,7 @@ uv run scripts/serve_policy.py policy:checkpoint \
 uv run scripts/serve_policy.py \
     --server-mode rtc \
     --rtc-execution-horizon 10 \
-    --rtc-inference-delay 2 \
+    --rtc-inference-delay 4 \
     --rtc-prefix-attention-schedule exp \
     --rtc-max-guidance-weight 10.0 \
     policy:checkpoint \
@@ -82,20 +82,26 @@ roslaunch realsense2_camera rs_multiple_devices.launch
 ```bash
 cd /path/to/openpi/openpi-on-LIFT2
 
-# 默认 profile：30Hz，不上采样
+# 默认 profile：30Hz 直接发布
 bash launch.sh --task tube
 
-# 上采样 profile：60Hz，30Hz -> 60Hz
-bash launch.sh --profile upsample --task tube
+# 平滑高频执行：policy/主循环 30Hz，按 policy waypoint 轨迹语义播放到 90Hz EEF command
+bash launch.sh --fast --task tube
 
 # RTC profile：每个控制 tick 都输入当前观测，后台异步推理下一段 action chunk
 bash launch.sh --profile rtc --task tube --verbose
 
-# 覆盖 profile 中的 host
-bash launch.sh --profile upsample --host <策略服务器IP> --task tube
+# 覆盖 profile 中的 host，并启用平滑高频执行
+bash launch.sh --fast --host <策略服务器IP> --task tube
 
 # 启用 3 路相机视频录制（结束后只确认是否保留；确认后静默在后台转视频；Ctrl+C 中断后也会继续询问是否保留）
-bash launch.sh --profile upsample --task tube --record_video
+bash launch.sh --fast --task tube --record_video
+
+# 启用 RTC/non-RTC compare 录制（默认不保存 compare 文件）
+bash launch.sh --fast --task tube --compare
+
+# 同时启用普通视频和 compare 录制
+bash launch.sh --fast --task tube --record_video --compare
 ```
 
 推荐在机器人端通过 `launch.sh` 启动客户端；该脚本会先 source 固定的 ROS 环境：`/home/arx/Desktop/LIFT/R5/ROS/R5_ws/devel/setup.bash`。
@@ -143,16 +149,25 @@ python3 deploy/client_lift2.py \
 - `color`: `Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.`
 
 ### 控制参数
-- `launch.sh` 通过 `launch_profiles.yaml` 管理启动参数，支持 `--profile default`、`--profile upsample` 和 `--profile rtc`
-- `default`: `host=192.168.101.101`、`port=7777`、`publish_rate=30`、`execute_horizon=30`、`action_chunk_size=30`、`source_hz=30`、`target_hz=30`
-- `upsample`: `host=192.168.101.101`、`port=7777`、`publish_rate=60`、`execute_horizon=59`、`action_chunk_size=30`、`source_hz=30`、`target_hz=60`
-- `rtc`: `client_mode=rtc`、`publish_rate=30`、`action_chunk_size=30`、`rtc_execution_horizon=10`、`rtc_inference_delay=2`
+- `launch.sh` 通过 `launch_profiles.yaml` 管理启动参数，支持 `--profile default` 和 `--profile rtc`
+- `default`: `host=192.168.101.101`、`port=7777`、`publish_rate=30`、`execute_horizon=30`、`action_chunk_size=30`
+- `--fast`: 在 `default`/`rtc` 的 30Hz policy tick 上启用 inference executor，默认按相邻 policy waypoint 轨迹语义播放到 90Hz EEF command
+- `rtc`: `client_mode=rtc`、`publish_rate=30`、`action_chunk_size=30`、`rtc_execution_horizon=10`、`rtc_inference_delay=4`
 - `--client_mode`: 客户端执行模式，`standard` 为本地动作队列，`rtc` 为 RTC 单步客户端
 - `--host` / `--port`: 可覆盖 profile 中的服务器地址
 - `--publish_rate`: 控制频率（Hz）（默认：30）
 - `--execute_horizon`: 每次推理执行的帧数（默认：10）
 - `--max_delta_xyz`: 单步 EEF xyz delta 限幅，单位米（默认：0.05）
 - `--max_delta_rpy`: 单步 EEF rpy delta 限幅，单位弧度（默认：0.2）
+- `--smooth_alpha`: 在应用 EEF delta 前缩放 xyz/rpy delta，默认 `1.0` 不改变行为；例如 `0.2` 表示每步只执行 20% 的预测位移，夹爪不受影响
+- `--fast`: 启用平滑高频 inference executor，等价于打开 `--enable_inference_executor` 并使用默认 90Hz executor
+- `--enable_inference_executor`: 启用后台 EEF 轨迹执行器
+- `--executor_strategy`: executor 策略，默认 `trajectory_buffer`。该策略在 standard 模式按顺序播放已提交 action chunk，在 RTC 模式保留 committed prefix 并替换 future tail；`legacy_interpolate` 保留旧的 last-command 插值行为
+- `--executor_rate_hz`: executor ROS command 发布频率（默认：90）
+- `--executor_interpolation`: executor 插值方式（默认：`linear`）
+- `--executor_gripper_mode`: 夹爪处理方式（默认：`passthrough`）
+- `--executor_max_queue_size`: executor 高层 action 队列长度（默认：60）
+- `--rtc_committed_prefix`: RTC 模式下 executor 已承诺执行的短期前缀长度；默认 `min(rtc_execution_horizon, rtc_inference_delay + 1)`
 - `--rtc_action_horizon`: RTC 模型 action chunk 长度，默认等于 `action_chunk_size`
 - `--rtc_execution_horizon`: RTC 后台请求下一段 chunk 的间隔，必须不超过 `rtc_action_horizon`
 - `--rtc_inference_delay`: RTC 固定推理延迟（控制步数），需要与服务端参数一致
@@ -183,6 +198,9 @@ python3 deploy/client_lift2.py \
 - `--verbose`: 启用详细日志
 - `--log_latency`: 记录每次推理的延迟
 - `--record_video`: 先将 3 路 D405 相机帧保存到 `./pic/{task}/{seq}/`，结束后先询问是否保留本次采集；确认保留后会静默在后台转成视频保存到 `./video/{task}/{seq}/`，这样可以更快开始下一次采集；不保留时会同时删除本次图片和视频目录。若按 **Ctrl+C** 中断，客户端会先尝试自动归位，然后继续询问是否保留本次录像
+- `--compare`: 显式启用 RTC/non-RTC 对比录制，输出到 `./rtc_real_compare/{task}`；如果同时开启 `--fast`，输出到 `./rtc_real_compare/{task}_fast`，避免覆盖非 fast 结果
+- `--rtc_compare_record`: `--compare` 的兼容别名
+- `--no_rtc_compare_record`: 关闭 compare 录制（默认已关闭，主要用于兼容旧命令）
 
 ### 图片转视频
 
@@ -210,9 +228,9 @@ bash launch.sh \
     --task tube \
     --verbose
 
-# 在机器人上：60Hz 上采样 profile
+# 在机器人上：平滑高频执行，policy/主循环 30Hz，EEF command 90Hz
 bash launch.sh \
-    --profile upsample \
+    --fast \
     --task tube \
     --verbose
 
@@ -233,13 +251,18 @@ bash launch.sh \
     --wait_after_init
 ```
 
-### 高频控制
+### 平滑高频执行
 ```bash
 bash launch.sh \
     --host 192.168.1.100 \
-    --publish_rate 60 \
-    --execute_horizon 5 \
+    --fast \
     --log_latency
+
+# 如果机器人动作仍偏猛，可先尝试缩放 EEF delta（不影响夹爪）
+bash launch.sh \
+    --fast \
+    --task tube \
+    --smooth_alpha 0.2
 ```
 
 ## 架构细节
@@ -259,11 +282,12 @@ bash launch.sh \
    - WebSocket连接到策略服务器
    - standard 模式：服务器返回动作序列（action_horizon × 14），客户端本地排队执行
    - rtc 模式：客户端每个控制 tick 输入当前观测，后台请求下一段 chunk，并立即返回单帧可执行动作
-   - action 表示为 EEF delta：`delta_xyz + delta_rpy + gripper`，客户端会累积 delta 得到目标 EEF 位姿后发布 `PosCmd`
+   - action 表示为 EEF delta：`delta_xyz + delta_rpy + gripper`，客户端会累积 delta 得到目标 EEF 位姿
 
 4. **动作执行**：
    - standard 模式执行前N个动作（execute_horizon），丢弃剩余动作防止误差累积
    - rtc 模式持续执行当前 chunk，同时用 RTC prefix guidance 异步生成下一段 chunk
+   - 未启用 `--fast` 时直接发布 `PosCmd`；启用 `--fast` 时由 inference executor 按相邻 policy waypoint 的轨迹语义播放到 90Hz EEF command
    - 根据模式二值化夹爪值
 
 5. **控制循环**：
@@ -285,7 +309,7 @@ bash launch.sh \
 | 控制空间 | 末端位姿（6D） | 末端执行器 EEF 位姿（7D每臂） |
 | 动作表示 | 绝对位姿+增量 | EEF delta + gripper |
 | 通信方式 | HTTP REST API | WebSocket |
-| 平滑处理 | 线性插值 | 无（策略生成） |
+| 平滑处理 | 线性插值 | 可选 inference executor（`--fast`，policy waypoint 轨迹播放，默认 90Hz） |
 | 状态输入 | 末端6D旋转 | EEF `xyz + rpy + gripper` |
 
 ## 故障排除
@@ -320,7 +344,7 @@ rostopic echo /arm_left/arm_status_ee
 ## 性能建议
 
 1. **网络**：使用有线千兆以太网获得最低延迟
-2. **控制频率**：推荐30Hz，快速任务可用60Hz
+2. **控制频率**：推荐30Hz；需要更平滑时使用 `--fast` 启用 90Hz EEF trajectory executor
 3. **执行范围**：10帧平衡响应性和稳定性
 4. **夹爪处理**：默认使用二值化；如需排查连续输出，可临时使用 `--no_binarize_gripper`
 
