@@ -13,6 +13,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1789,7 +1790,14 @@ def main():
         print('Starting OpenPI client...')
         print()
 
-    rospy.init_node('openpi_lift2_client', anonymous=True)
+    # Keep ROS alive while an interrupt unwinds model_inference().  With
+    # rospy's default signal handler, Ctrl+C marks ROS as shutdown before the
+    # cleanup block can publish the return-to-initial-pose trajectory.  Map
+    # SIGTERM to the same graceful cleanup path instead of restoring its
+    # default immediate process termination behavior.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    rospy.init_node('openpi_lift2_client', anonymous=True, disable_signals=True)
 
     rospy.loginfo("="*50)
     rospy.loginfo("OpenPI LIFT2 Client Starting (EEF Delta Control)")
@@ -1864,9 +1872,14 @@ def main():
     try:
         interrupted = model_inference(args, config, ros_operator)
     finally:
-        ros_operator.close_video_writers()
-        finalize_rtc_compare_session(args)
-        finalize_video_outputs(args, interrupted=interrupted)
+        try:
+            ros_operator.close_video_writers()
+            finalize_rtc_compare_session(args)
+            finalize_video_outputs(args, interrupted=interrupted)
+        finally:
+            # ROS shutdown must happen after model_inference() has stopped the
+            # executor and returned the real robot to its initial pose.
+            rospy.signal_shutdown('OpenPI client cleanup completed')
 
 
 if __name__ == '__main__':
