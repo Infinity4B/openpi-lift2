@@ -6,6 +6,14 @@ profiles:
     execute_horizon: 30
     action_chunk_size: 30
 
+  lx:
+    host: i-2.gpushare.com
+    port: 58244
+    client_mode: standard
+    publish_rate: 30
+    execute_horizon: 16
+    action_chunk_size: 16
+
   rtc:
     host: 192.168.101.101
     port: 7777

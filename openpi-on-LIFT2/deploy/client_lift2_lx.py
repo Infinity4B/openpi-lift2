@@ -39,12 +39,22 @@ from deploy.utils.eef_action_executor import EEFInterpolatingExecutor, EEFTrajec
 
 CAMERA_NAMES = ['head', 'left_wrist', 'right_wrist']
 
-DEFAULT_LANGUAGE_INSTRUCTION = 'perform task'
-DEFAULT_MAX_PUBLISH_STEP = 1000
+# The cube specialist owns the task instruction on the server.  The robot
+# client deliberately keeps the task prompt empty by default.
+DEFAULT_LANGUAGE_INSTRUCTION = ''
+DEFAULT_MAX_PUBLISH_STEP = 1
 DEFAULT_LAUNCH_CONFIG = Path(parent_dir) / 'launch_profiles.yaml'
 DEFAULT_RTC_COMPARE_OUTPUT_DIR = Path(parent_dir) / 'rtc_real_compare'
-DEFAULT_MAX_DELTA_XYZ = 0.05
-DEFAULT_MAX_DELTA_RPY = 0.2
+DEFAULT_MAX_DELTA_XYZ = 0.01
+DEFAULT_MAX_DELTA_RPY = 0.05
+EXPECTED_SERVER_METADATA = {
+    'model': 'motus_lift2',
+    'action_space': 'lift2_delta_eef',
+    'client_mode': 'standard',
+    'rtc_supported': False,
+    'action_horizon': 16,
+    'action_dim': 14,
+}
 RTC_COMPARE_CAMERA_DIR_NAMES = {
     'head': 'camera_h',
     'left_wrist': 'camera_l',
@@ -54,8 +64,8 @@ LEGACY_RUNTIME_DEFAULTS = {
     'host': '192.168.101.101',
     'port': 7777,
     'publish_rate': 30,
-    'execute_horizon': 30,
-    'action_chunk_size': 30,
+    'execute_horizon': 4,
+    'action_chunk_size': 16,
     'max_publish_step': DEFAULT_MAX_PUBLISH_STEP,
 }
 PROFILE_OPTIONAL_KEYS = (
@@ -98,8 +108,6 @@ PRESET_TASK_INSTRUCTIONS = {
     'stack': 'Stack the building blocks one by one with the larger ones at the bottom.',
     'size': 'Pick up the four randomly placed cylinders and insert each one into the matching hole according to its size.',
     'color': 'Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.',
-    'cube': 'Put the block on the plate.',
-    'light': 'Identify and pick up the illuminated red light from the rotating turntable, then place it aside.',
 }
 
 
@@ -169,6 +177,10 @@ def finalize_runtime_args(args):
     args.client_mode = args.client_mode.lower()
     if args.client_mode not in ('standard', 'rtc'):
         raise ValueError(f"client_mode must be 'standard' or 'rtc', got {args.client_mode!r}")
+    if args.client_mode != 'standard':
+        raise ValueError(
+            "This cube specialist supports only client_mode='standard'; RTC is disabled."
+        )
 
     if not (0.0 < args.smooth_alpha <= 1.0):
         raise ValueError(
@@ -1019,6 +1031,18 @@ class OpenPIClientModel:
                 host=host,
                 port=port
             )
+        metadata = self.client.get_server_metadata()
+        mismatches = {
+            key: (metadata.get(key), expected)
+            for key, expected in EXPECTED_SERVER_METADATA.items()
+            if metadata.get(key) != expected
+        }
+        if mismatches:
+            raise RuntimeError(
+                "Connected policy server does not match the cube LIFT2 contract: "
+                f"{mismatches}; full metadata={metadata}"
+            )
+        rospy.loginfo(f"Validated policy server metadata: {metadata}")
         self.execute_horizon = execute_horizon
         self.executed_count = 0
         self.action_chunk_size = action_chunk_size
@@ -1340,6 +1364,15 @@ def get_action(args, config, ros_operator, policy):
 
         # Current EEF state
         obs['eef'] = pose_to_eef(arm_left_pose, arm_right_pose)
+        if args.dry_run:
+            rospy.loginfo(
+                "[No-motion observation.state 14D] "
+                + np.array2string(
+                    np.asarray(obs['eef'], dtype=np.float32),
+                    precision=6,
+                    suppress_small=False,
+                )
+            )
 
         # Inference
         policy.set_current_eef(obs['eef'])
@@ -1688,7 +1721,7 @@ def get_arguments():
 
     # Initialization
     parser.add_argument('--auto_init', action='store_true', default=True,
-                        help='Auto move to initial pose on startup')
+                        help='Auto move to initial pose on startup (default)')
     parser.add_argument('--no_auto_init', action='store_false', dest='auto_init',
                         help='Disable auto initialization')
     parser.add_argument('--init_duration', type=float, default=3.0,
@@ -1734,7 +1767,9 @@ def get_arguments():
     parser.add_argument('--record_video', action='store_true', default=False,
                         help='Record three camera videos to ./video/{task}/{seq}')
     parser.add_argument('--dry_run', action='store_true', default=False,
-                        help='Run perception and policy inference but do not publish arm commands or auto-initialize')
+                        help='Run perception and policy inference without publishing arm commands')
+    parser.add_argument('--execute', action='store_false', dest='dry_run',
+                        help='Enable robot command publication (default)')
     parser.add_argument('--rtc_compare_output_dir', type=str, default='rtc_real_compare',
                         help='Directory for real robot RTC/non-RTC comparison outputs')
     parser.add_argument('--compare', action='store_true', dest='rtc_compare_record', default=False,
@@ -1793,8 +1828,8 @@ def main():
     # Keep ROS alive while an interrupt unwinds model_inference().  With
     # rospy's default signal handler, Ctrl+C marks ROS as shutdown before the
     # cleanup block can publish the return-to-initial-pose trajectory.  Map
-    # SIGTERM to the same graceful cleanup path instead of restoring its
-    # default immediate process termination behavior.
+    # SIGTERM to the same graceful cleanup path instead of immediate process
+    # termination.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     rospy.init_node('openpi_lift2_client', anonymous=True, disable_signals=True)
@@ -1877,8 +1912,8 @@ def main():
             finalize_rtc_compare_session(args)
             finalize_video_outputs(args, interrupted=interrupted)
         finally:
-            # ROS shutdown must happen after model_inference() has stopped the
-            # executor and returned the real robot to its initial pose.
+            # Shut ROS down only after executor shutdown and homing have
+            # completed, while command publishers are still usable.
             rospy.signal_shutdown('OpenPI client cleanup completed')
 
 
