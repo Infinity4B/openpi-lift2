@@ -1085,15 +1085,9 @@ class OpenPIClientModel:
             raise ValueError(f"Current EEF contains NaN/Inf: {current_eef}")
 
         observation = {
-            "observation.images.head": image_tools.convert_to_uint8(
-                image_tools.resize_with_pad(head_img, 224, 224)
-            ),
-            "observation.images.left_wrist": image_tools.convert_to_uint8(
-                image_tools.resize_with_pad(left_wrist_img, 224, 224)
-            ),
-            "observation.images.right_wrist": image_tools.convert_to_uint8(
-                image_tools.resize_with_pad(right_wrist_img, 224, 224)
-            ),
+            "observation.images.head": image_tools.convert_to_uint8(head_img),
+            "observation.images.left_wrist": image_tools.convert_to_uint8(left_wrist_img),
+            "observation.images.right_wrist": image_tools.convert_to_uint8(right_wrist_img),
             "observation.state": current_eef,
             "prompt": args.language_instruction,
         }
