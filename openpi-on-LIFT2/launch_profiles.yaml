@@ -13,6 +13,7 @@ profiles:
     publish_rate: 30
     execute_horizon: 16
     action_chunk_size: 16
+    max_publish_step: 600
 
   rtc:
     host: 192.168.101.101
