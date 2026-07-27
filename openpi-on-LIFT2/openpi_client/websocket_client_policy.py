@@ -9,24 +9,31 @@ from openpi_client import msgpack_numpy
 
 
 def _connect(uri, headers):
-    try:
-        return websockets.sync.client.connect(
-            uri,
-            compression=None,
-            max_size=None,
-            ping_interval=None,
-            ping_timeout=None,
-            additional_headers=headers,
-        )
-    except TypeError:
-        return websockets.sync.client.connect(
-            uri,
-            compression=None,
-            max_size=None,
-            ping_interval=None,
-            ping_timeout=None,
-            extra_headers=headers,
-        )
+    attempts = (
+        {
+            "compression": None,
+            "max_size": None,
+            "ping_interval": None,
+            "ping_timeout": None,
+            "additional_headers": headers,
+        },
+        {
+            "compression": None,
+            "max_size": None,
+            "ping_interval": None,
+            "ping_timeout": None,
+            "extra_headers": headers,
+        },
+        {"compression": None, "max_size": None, "additional_headers": headers},
+        {"compression": None, "max_size": None, "extra_headers": headers},
+    )
+    last_type_error = None
+    for kwargs in attempts:
+        try:
+            return websockets.sync.client.connect(uri, **kwargs)
+        except TypeError as exc:
+            last_type_error = exc
+    raise last_type_error
 
 
 class WebsocketClientPolicy(_base_policy.BasePolicy):
