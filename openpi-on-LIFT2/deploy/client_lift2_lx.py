@@ -39,8 +39,8 @@ from deploy.utils.eef_action_executor import EEFInterpolatingExecutor, EEFTrajec
 
 CAMERA_NAMES = ['head', 'left_wrist', 'right_wrist']
 
-# The cube specialist owns the task instruction on the server.  The robot
-# client deliberately keeps the task prompt empty by default.
+# The cube specialist owns the task instruction on the server. The robot
+# client deliberately sends no task text.
 DEFAULT_LANGUAGE_INSTRUCTION = ''
 DEFAULT_MAX_PUBLISH_STEP = 1
 DEFAULT_LAUNCH_CONFIG = Path(parent_dir) / 'launch_profiles.yaml'
@@ -61,10 +61,10 @@ RTC_COMPARE_CAMERA_DIR_NAMES = {
     'right_wrist': 'camera_r',
 }
 LEGACY_RUNTIME_DEFAULTS = {
-    'host': '192.168.101.101',
-    'port': 7777,
+    'host': 'i-2.gpushare.com',
+    'port': 58244,
     'publish_rate': 30,
-    'execute_horizon': 4,
+    'execute_horizon': 16,
     'action_chunk_size': 16,
     'max_publish_step': DEFAULT_MAX_PUBLISH_STEP,
 }
@@ -108,6 +108,8 @@ PRESET_TASK_INSTRUCTIONS = {
     'stack': 'Stack the building blocks one by one with the larger ones at the bottom.',
     'size': 'Pick up the four randomly placed cylinders and insert each one into the matching hole according to its size.',
     'color': 'Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.',
+    'cube': 'Put the block on the plate.',
+    'light': 'Identify and pick up the illuminated red light from the rotating turntable, then place it aside.',
 }
 
 
@@ -277,6 +279,11 @@ def format_launcher_summary(args):
             f"(dir -> {args.rtc_compare_output_dir}/{get_rtc_compare_task_name(args)}, "
             f"suffix -> _{get_rtc_compare_mode_suffix(args.client_mode)})"
         )
+    if not args.disable_action_trace:
+        lines.append(
+            "Action Trace: ON "
+            f"(path -> {args.action_trace_path or '/tmp/openpi-lift2/<task>/action_traces/<session>.jsonl'})"
+        )
     if args.debug:
         lines.append('Debug Mode: ON (press Enter each step)')
 
@@ -345,6 +352,62 @@ def setup_recording_output_dirs(args):
         args.recording_tmp_session_dir = None
         args.recording_tmp_frames_dir = None
         args.recording_tmp_videos_dir = None
+
+
+def setup_action_trace_output(args):
+    """Create a small JSONL trace for policy chunks and actually published actions."""
+    if getattr(args, 'disable_action_trace', False):
+        args.action_trace_path = None
+        return
+
+    if args.action_trace_path is None:
+        task_name = args.task if args.task else 'custom'
+        trace_root = os.path.join('/tmp/openpi-lift2', task_name, 'action_traces')
+        os.makedirs(trace_root, exist_ok=True)
+        trace_name = f"{time.strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}.jsonl"
+        args.action_trace_path = os.path.join(trace_root, trace_name)
+    else:
+        trace_root = os.path.dirname(os.path.abspath(args.action_trace_path))
+        if trace_root:
+            os.makedirs(trace_root, exist_ok=True)
+
+    rospy.loginfo(f"Action trace JSONL: {args.action_trace_path}")
+
+
+def _json_ready(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    return value
+
+
+def append_action_trace(args, record):
+    trace_path = getattr(args, 'action_trace_path', None)
+    if not trace_path:
+        return
+    try:
+        with open(trace_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(_json_ready(record), ensure_ascii=False) + '\n')
+    except Exception as exc:
+        rospy.logwarn(f"Failed to append action trace {trace_path}: {exc}")
+
+
+def get_current_eef_from_ros(ros_operator):
+    if len(ros_operator.arm_left_pose_deque) == 0 or len(ros_operator.arm_right_pose_deque) == 0:
+        return None
+    try:
+        return np.asarray(
+            pose_to_eef(ros_operator.arm_left_pose_deque[-1], ros_operator.arm_right_pose_deque[-1]),
+            dtype=np.float32,
+        )
+    except Exception as exc:
+        rospy.logwarn(f"Failed to read current EEF for action trace: {exc}")
+        return None
 
 
 def prompt_keep_recorded_video(record_video_final_video_dir, recording_tmp_frames_dir):
@@ -1032,6 +1095,10 @@ class OpenPIClientModel:
                 port=port
             )
         metadata = self.client.get_server_metadata()
+        if not isinstance(metadata, dict):
+            raise RuntimeError(
+                f"Expected policy server metadata dict, got {type(metadata)!r}: {metadata!r}"
+            )
         mismatches = {
             key: (metadata.get(key), expected)
             for key, expected in EXPECTED_SERVER_METADATA.items()
@@ -1048,6 +1115,7 @@ class OpenPIClientModel:
         self.action_chunk_size = action_chunk_size
         self.reset()
         self.current_eef = None
+        self.last_policy_trace_payload = None
 
     def reset(self):
         """Reset action queue at the start of each episode"""
@@ -1055,6 +1123,7 @@ class OpenPIClientModel:
         self.executed_count = 0
         self.rtc_pred_eef = None
         self.latest_executor_action_chunk = None
+        self.last_policy_trace_payload = None
         if self.client_mode == 'rtc':
             self.client.reset()
         return None
@@ -1063,6 +1132,11 @@ class OpenPIClientModel:
         action_chunk = self.latest_executor_action_chunk
         self.latest_executor_action_chunk = None
         return action_chunk
+
+    def pop_last_policy_trace_payload(self):
+        payload = self.last_policy_trace_payload
+        self.last_policy_trace_payload = None
+        return payload
 
     def close(self):
         if hasattr(self.client, 'close'):
@@ -1189,6 +1263,15 @@ class OpenPIClientModel:
         base_eef = current_eef if self.rtc_pred_eef is None else self.rtc_pred_eef
         action_predict = apply_eef_delta(base_eef, delta_action)
         self.rtc_pred_eef = action_predict.copy()
+        self.last_policy_trace_payload = {
+            'client_mode': 'rtc',
+            'current_eef_for_request': current_eef.copy(),
+            'raw_delta_action_14': np.asarray(result["actions"], dtype=np.float32).copy(),
+            'sanitized_smoothed_delta_action_14': delta_action.copy(),
+            'absolute_target_14_before_gripper_postprocess': action_predict.copy(),
+            'estimated_delay_steps': delay_steps,
+            'server_timing': server_timing,
+        }
 
         if args.log_latency or args.verbose:
             rospy.loginfo(f"[RTC Latency] control tick: {latency_ms:.1f} ms, estimated delay={delay_steps} steps")
@@ -1271,6 +1354,22 @@ class OpenPIClientModel:
                 dtype=np.float32,
             )
             self.executed_count = 0
+            self.last_policy_trace_payload = {
+                'client_mode': 'standard',
+                'current_eef_for_request': current_eef.copy(),
+                'raw_delta_chunk_16x14': np.asarray(action_chunk, dtype=np.float32).copy(),
+                'absolute_targets_16x14_before_gripper_postprocess': np.asarray(
+                    absolute_actions,
+                    dtype=np.float32,
+                ).copy(),
+                'executor_actions_16x14_after_gripper_postprocess': np.asarray(
+                    executor_actions,
+                    dtype=np.float32,
+                ).copy(),
+                'execute_horizon': self.execute_horizon,
+                'action_chunk_size': self.action_chunk_size,
+                'server_timing': server_timing,
+            }
 
             if args.verbose:
                 rospy.loginfo(f"[Inference] Generated {len(absolute_actions)} frames, will execute {self.execute_horizon}")
@@ -1530,7 +1629,9 @@ def model_inference(args, config, ros_operator):
                 rospy.loginfo("ROS shutdown detected, stopping inference loop")
                 break
 
+            pre_publish_eef = get_current_eef_from_ros(ros_operator)
             action = get_action(args, config, ros_operator, policy)
+            policy_trace_payload = policy.pop_last_policy_trace_payload()
 
             duration = time.time() - start_time
             count += 1
@@ -1564,9 +1665,12 @@ def model_inference(args, config, ros_operator):
             # Publish to ROS unless dry-run is enabled.
             execution_start_wall_ns = time.time_ns()
             execution_start_s = time.perf_counter()
+            publish_path = 'direct'
             if args.dry_run:
+                publish_path = 'dry_run'
                 rospy.loginfo_throttle(1.0, "[Dry Run] Skipping ROS command publish")
             elif inference_executor is not None:
+                publish_path = f'executor:{args.executor_strategy}'
                 if args.executor_strategy == 'trajectory_buffer' and args.client_mode == 'rtc':
                     inference_executor.merge_rtc_action(
                         action,
@@ -1587,6 +1691,31 @@ def model_inference(args, config, ros_operator):
             step_index = t
             t += 1
             rate.sleep()
+            post_publish_eef = get_current_eef_from_ros(ros_operator)
+            append_action_trace(
+                args,
+                {
+                    'schema_version': 1,
+                    'record_type': 'client_publish_step',
+                    'time_wall_ns': time.time_ns(),
+                    'step_index': step_index,
+                    'client_mode': args.client_mode,
+                    'dry_run': bool(args.dry_run),
+                    'publish_path': publish_path,
+                    'publish_rate': args.publish_rate,
+                    'execute_horizon': args.execute_horizon,
+                    'action_chunk_size': args.action_chunk_size,
+                    'max_delta_xyz': args.max_delta_xyz,
+                    'max_delta_rpy': args.max_delta_rpy,
+                    'smooth_alpha': args.smooth_alpha,
+                    'pre_publish_eef': pre_publish_eef,
+                    'action_absolute_14_after_gripper_postprocess': np.asarray(action, dtype=np.float32),
+                    'left_action': np.asarray(left_action, dtype=np.float32),
+                    'right_action': np.asarray(right_action, dtype=np.float32),
+                    'post_publish_eef': post_publish_eef,
+                    'policy_fetch': policy_trace_payload,
+                },
+            )
             record_rtc_compare_execution(
                 args,
                 execution_start_s,
@@ -1715,7 +1844,7 @@ def get_arguments():
 
     # Initialization
     parser.add_argument('--auto_init', action='store_true', default=True,
-                        help='Auto move to initial pose on startup (default)')
+                        help='Auto move to initial pose on startup')
     parser.add_argument('--no_auto_init', action='store_false', dest='auto_init',
                         help='Disable auto initialization')
     parser.add_argument('--init_duration', type=float, default=3.0,
@@ -1760,10 +1889,10 @@ def get_arguments():
                         help='Debug mode: press Enter to execute each action step')
     parser.add_argument('--record_video', action='store_true', default=False,
                         help='Record three camera videos to ./video/{task}/{seq}')
-    parser.add_argument('--dry_run', action='store_true', default=False,
-                        help='Run perception and policy inference without publishing arm commands')
+    parser.add_argument('--dry_run', action='store_true', default=True,
+                        help='Run perception and policy inference without publishing arm commands (default)')
     parser.add_argument('--execute', action='store_false', dest='dry_run',
-                        help='Enable robot command publication (default)')
+                        help='Explicitly enable robot command publication; use only after no-motion validation')
     parser.add_argument('--rtc_compare_output_dir', type=str, default='rtc_real_compare',
                         help='Directory for real robot RTC/non-RTC comparison outputs')
     parser.add_argument('--compare', action='store_true', dest='rtc_compare_record', default=False,
@@ -1772,6 +1901,10 @@ def get_arguments():
                         help='Alias for --compare')
     parser.add_argument('--no_rtc_compare_record', action='store_false', dest='rtc_compare_record',
                         help='Disable RTC/non-RTC comparison image and timeline recording')
+    parser.add_argument('--action_trace_path', type=str, default=None,
+                        help='JSONL path for per-step published actions and one-shot policy chunks')
+    parser.add_argument('--disable_action_trace', action='store_true', default=False,
+                        help='Disable the default small JSONL action trace')
 
     # Gripper control
     parser.add_argument('--binarize_gripper', action='store_true', default=True,
@@ -1822,8 +1955,8 @@ def main():
     # Keep ROS alive while an interrupt unwinds model_inference().  With
     # rospy's default signal handler, Ctrl+C marks ROS as shutdown before the
     # cleanup block can publish the return-to-initial-pose trajectory.  Map
-    # SIGTERM to the same graceful cleanup path instead of immediate process
-    # termination.
+    # SIGTERM to the same graceful cleanup path instead of restoring its
+    # default immediate process termination behavior.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     rospy.init_node('openpi_lift2_client', anonymous=True, disable_signals=True)
@@ -1865,6 +1998,7 @@ def main():
     rospy.loginfo(f"Language instruction: {args.language_instruction}")
     prepare_rtc_compare_output(args)
     setup_recording_output_dirs(args)
+    setup_action_trace_output(args)
     setup_rtc_compare_recording_output(args)
     rospy.loginfo(
         "Video recording state: "
@@ -1906,8 +2040,8 @@ def main():
             finalize_rtc_compare_session(args)
             finalize_video_outputs(args, interrupted=interrupted)
         finally:
-            # Shut ROS down only after executor shutdown and homing have
-            # completed, while command publishers are still usable.
+            # ROS shutdown must happen after model_inference() has stopped the
+            # executor and returned the real robot to its initial pose.
             rospy.signal_shutdown('OpenPI client cleanup completed')
 
 
