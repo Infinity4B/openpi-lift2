@@ -11,11 +11,21 @@ from openpi_client import msgpack_numpy
 def _connect(uri, headers):
     try:
         return websockets.sync.client.connect(
-            uri, compression=None, max_size=None, additional_headers=headers
+            uri,
+            compression=None,
+            max_size=None,
+            ping_interval=None,
+            ping_timeout=None,
+            additional_headers=headers,
         )
     except TypeError:
         return websockets.sync.client.connect(
-            uri, compression=None, max_size=None, extra_headers=headers
+            uri,
+            compression=None,
+            max_size=None,
+            ping_interval=None,
+            ping_timeout=None,
+            extra_headers=headers,
         )
 
 
