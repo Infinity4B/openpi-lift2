@@ -39,8 +39,9 @@ from deploy.utils.eef_action_executor import EEFInterpolatingExecutor, EEFTrajec
 
 CAMERA_NAMES = ['head', 'left_wrist', 'right_wrist']
 
-# The cube specialist owns the task instruction on the server. The robot
-# client deliberately sends no task text.
+# The multitask server owns the canonical training instruction for each task.
+# The robot sends only a task identifier and never supplies free-form prompt
+# text to the policy.
 DEFAULT_LANGUAGE_INSTRUCTION = ''
 DEFAULT_MAX_PUBLISH_STEP = 1
 DEFAULT_LAUNCH_CONFIG = Path(parent_dir) / 'launch_profiles.yaml'
@@ -108,7 +109,8 @@ PRESET_TASK_INSTRUCTIONS = {
     'stack': 'Stack the building blocks one by one with the larger ones at the bottom.',
     'size': 'Pick up the four randomly placed cylinders and insert each one into the matching hole according to its size.',
     'color': 'Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.',
-    'cube': 'Put the block on the plate.',
+    'cube_grasp': 'Grasp the small cube from the table.',
+    'cube': 'Grasp the small cube from the table.',
     'light': 'Identify and pick up the illuminated red light from the rotating turntable, then place it aside.',
 }
 
@@ -119,6 +121,12 @@ def resolve_language_instruction(args):
     if args.task:
         return PRESET_TASK_INSTRUCTIONS[args.task]
     return DEFAULT_LANGUAGE_INSTRUCTION
+
+
+def resolve_server_task_name(task):
+    if task == 'cube':
+        return 'cube_grasp'
+    return task
 
 
 def load_launch_profile(config_path, profile_name):
@@ -1163,7 +1171,7 @@ class OpenPIClientModel:
             "observation.images.left_wrist": image_tools.convert_to_uint8(left_wrist_img),
             "observation.images.right_wrist": image_tools.convert_to_uint8(right_wrist_img),
             "observation.state": current_eef,
-            "prompt": args.language_instruction,
+            "task": resolve_server_task_name(args.task),
         }
         return observation, current_eef
 
