@@ -53,7 +53,6 @@ EXPECTED_SERVER_METADATA = {
     'action_space': 'lift2_delta_eef',
     'client_mode': 'standard',
     'rtc_supported': False,
-    'action_horizon': 16,
     'action_dim': 14,
 }
 RTC_COMPARE_CAMERA_DIR_NAMES = {
@@ -1100,9 +1099,13 @@ class OpenPIClientModel:
             raise RuntimeError(
                 f"Expected policy server metadata dict, got {type(metadata)!r}: {metadata!r}"
             )
+        expected_server_metadata = {
+            **EXPECTED_SERVER_METADATA,
+            'action_horizon': action_chunk_size,
+        }
         mismatches = {
             key: (metadata.get(key), expected)
-            for key, expected in EXPECTED_SERVER_METADATA.items()
+            for key, expected in expected_server_metadata.items()
             if metadata.get(key) != expected
         }
         if mismatches:
