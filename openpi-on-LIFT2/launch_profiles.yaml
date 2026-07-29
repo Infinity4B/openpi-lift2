@@ -11,8 +11,8 @@ profiles:
     port: 58244
     client_mode: standard
     publish_rate: 30
-    execute_horizon: 16
-    action_chunk_size: 16
+    execute_horizon: 32
+    action_chunk_size: 32
     max_publish_step: 600
 
   rtc:
