@@ -49,12 +49,21 @@ DEFAULT_RTC_COMPARE_OUTPUT_DIR = Path(parent_dir) / 'rtc_real_compare'
 DEFAULT_MAX_DELTA_XYZ = 0.01
 DEFAULT_MAX_DELTA_RPY = 0.05
 EXPECTED_SERVER_METADATA = {
-    'model': 'motus_lift2',
+    'model': ('motus_lift2_stage_jepa', 'motus_lift2'),
     'action_space': 'lift2_delta_eef',
     'client_mode': 'standard',
     'rtc_supported': False,
     'action_dim': 14,
 }
+
+
+def _server_metadata_value_matches(actual, expected):
+    """Treat a tuple of expected values as an allowlist."""
+    if isinstance(expected, tuple):
+        return actual in expected
+    return actual == expected
+
+
 RTC_COMPARE_CAMERA_DIR_NAMES = {
     'head': 'camera_h',
     'left_wrist': 'camera_l',
@@ -1113,7 +1122,7 @@ class OpenPIClientModel:
         mismatches = {
             key: (metadata.get(key), expected)
             for key, expected in expected_server_metadata.items()
-            if metadata.get(key) != expected
+            if not _server_metadata_value_matches(metadata.get(key), expected)
         }
         if mismatches:
             raise RuntimeError(
