@@ -98,6 +98,7 @@ PRESET_TASK_INSTRUCTIONS = {
     'stack': 'Stack the building blocks one by one with the larger ones at the bottom.',
     'size': 'Pick up the four randomly placed cylinders and insert each one into the matching hole according to its size.',
     'color': 'Pick up each colored cylinder placed in front of the base and insert it into the empty groove at the matching color position on the 4-by-4 board.',
+    'moving_cube': 'Grasp the moving cube and place it on the plate.',
     'cube': 'Put the block on the plate.',
     'light': 'Identify and pick up the illuminated red light from the rotating turntable, then place it aside.',
 }

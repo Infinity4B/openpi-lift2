@@ -301,7 +301,7 @@ bash launch.sh --profile upsample --task tube --language_instruction "describe y
 - `--config FILE`: 指定 YAML 配置文件路径
 - `--host IP`: 覆盖 profile 中的 Policy server IP 地址
 - `--port PORT`: 覆盖 profile 中的端口
-- `--task NAME`: 任务简写，自动填充默认任务描述。支持：`tube`、`towel`、`wrench`、`power_strip`、`drum`、`dice`、`stack`
+- `--task NAME`: 任务简写，自动填充默认任务描述。支持：`moving_cube`、`cube`、`light`、`size`、`color`、`tube`、`towel`、`wrench`、`power_strip`、`drum`、`dice`、`stack`
 - `--language_instruction TEXT`: 自定义任务语言指令；如果同时传入，会覆盖 `--task` 的默认描述
 - `--verbose`: 详细日志
 - `--debug`: 单步调试模式，每步按 Enter 执行，显示动作详情
