@@ -1853,6 +1853,50 @@ _CONFIGS = [
         batch_size=32,
     ),
     #
+    # Merged four-task LIFT2 image dataset.
+    #
+    TrainConfig(
+        name="pi05_lift2_df_image",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="lerobot_lift2_df_image",
+            default_prompt="perform task",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        batch_size=32,
+        num_workers=8,
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_lift2_df_image_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLift2DataConfig(
+            repo_id="lerobot_lift2_df_image",
+            default_prompt="perform task",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        batch_size=32,
+        num_workers=8,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
     #
     TrainConfig(
