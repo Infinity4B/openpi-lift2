@@ -1,0 +1,256 @@
+{
+  "benchmark": {
+    "checkpoint": "/soft/wangxi/openpi-lift2/checkpoints/pi0_lift2_df_image/pi0_lift2_df_image_full/99999",
+    "config": "pi0_lift2_df_image",
+    "fixed_noise": true,
+    "gpu_visible_devices": "1",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "model": "standard",
+    "noise_shape": [
+      30,
+      32
+    ],
+    "repeats": 50,
+    "sample_count": 16,
+    "sample_metadata": [
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 0,
+        "row": 0
+      },
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 37,
+        "row": 37
+      },
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 74,
+        "row": 74
+      },
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 111,
+        "row": 111
+      },
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 148,
+        "row": 148
+      },
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 185,
+        "row": 185
+      },
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 222,
+        "row": 222
+      },
+      {
+        "episode_index": 0,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000000.parquet",
+        "frame_index": 259,
+        "row": 259
+      },
+      {
+        "episode_index": 1,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000001.parquet",
+        "frame_index": 0,
+        "row": 0
+      },
+      {
+        "episode_index": 1,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000001.parquet",
+        "frame_index": 37,
+        "row": 37
+      },
+      {
+        "episode_index": 1,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000001.parquet",
+        "frame_index": 74,
+        "row": 74
+      },
+      {
+        "episode_index": 1,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000001.parquet",
+        "frame_index": 111,
+        "row": 111
+      },
+      {
+        "episode_index": 1,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000001.parquet",
+        "frame_index": 148,
+        "row": 148
+      },
+      {
+        "episode_index": 1,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000001.parquet",
+        "frame_index": 185,
+        "row": 185
+      },
+      {
+        "episode_index": 1,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000001.parquet",
+        "frame_index": 222,
+        "row": 222
+      },
+      {
+        "episode_index": 2,
+        "file": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image/data/chunk-000/episode_000002.parquet",
+        "frame_index": 0,
+        "row": 0
+      }
+    ],
+    "timestamp_unix": 1789975720.6698198,
+    "warmup": 5
+  },
+  "dataset": {
+    "dataset_root": "/soft/wangxi/.cache/huggingface/lerobot/lerobot_lift2_df_image",
+    "decoded_samples": 16,
+    "image_shape": [
+      480,
+      640,
+      3
+    ],
+    "parquet_read_and_decode_total_ms": 248.391881,
+    "png_decode_ms": {
+      "max_ms": 17.318026,
+      "mean_ms": 11.8088074375,
+      "median_ms": 11.604800000000001,
+      "min_ms": 10.586032,
+      "n": 16,
+      "p90_ms": 12.201343999999999,
+      "p95_ms": 13.61709775,
+      "std_ms": 1.5573850035884285
+    },
+    "rows_scanned": 766,
+    "source_files": 3,
+    "state_shape": [
+      14
+    ]
+  },
+  "internal_model_timing": {
+    "compile_ms": {
+      "flow_step_one": 2762.3069,
+      "prefix_cache": 3884.00283,
+      "sampler_10_steps": 3626.376797
+    },
+    "derived_10_flow_steps_ms": {
+      "prefix_plus_10_steps_mean": 42.518751800000004,
+      "sampler_10_steps_mean": 34.94352015
+    },
+    "flow_step_one": {
+      "max_ms": 2.310355,
+      "mean_ms": 2.2439203,
+      "median_ms": 2.2395519999999998,
+      "min_ms": 2.15772,
+      "n": 10,
+      "p90_ms": 2.2864258,
+      "p95_ms": 2.2983904,
+      "std_ms": 0.04133460183282016
+    },
+    "prefix_cache": {
+      "max_ms": 20.43231,
+      "mean_ms": 20.0795488,
+      "median_ms": 20.129181000000003,
+      "min_ms": 19.626518,
+      "n": 10,
+      "p90_ms": 20.2888158,
+      "p95_ms": 20.3605629,
+      "std_ms": 0.22990485615566184
+    },
+    "sampler_10_steps": {
+      "max_ms": 35.06661,
+      "mean_ms": 34.94352015,
+      "median_ms": 34.937882,
+      "min_ms": 34.808228,
+      "n": 20,
+      "p90_ms": 35.046416,
+      "p95_ms": 35.048674,
+      "std_ms": 0.07666218678776025
+    }
+  },
+  "model_load_ms": 3478.134951,
+  "policy_level_timing": {
+    "breakdown": {
+      "device_to_host_ms": {
+        "max_ms": 1.68607,
+        "mean_ms": 1.03105332,
+        "median_ms": 1.0254020000000001,
+        "min_ms": 0.755279,
+        "n": 50,
+        "p90_ms": 1.2834302000000002,
+        "p95_ms": 1.4555592,
+        "std_ms": 0.22163108830883074
+      },
+      "host_to_device_ms": {
+        "max_ms": 2.904218,
+        "mean_ms": 2.55323658,
+        "median_ms": 2.5387375,
+        "min_ms": 2.242823,
+        "n": 50,
+        "p90_ms": 2.7595183,
+        "p95_ms": 2.80147165,
+        "std_ms": 0.14120741530003997
+      },
+      "input_transform_ms": {
+        "max_ms": 5.248409,
+        "mean_ms": 4.00231214,
+        "median_ms": 3.9695085,
+        "min_ms": 3.937644,
+        "n": 50,
+        "p90_ms": 4.0070613,
+        "p95_ms": 4.0679131,
+        "std_ms": 0.18324930484585797
+      },
+      "model_sampler_ms": {
+        "max_ms": 35.339087,
+        "mean_ms": 35.16654328,
+        "median_ms": 35.152066500000004,
+        "min_ms": 35.052465,
+        "n": 50,
+        "p90_ms": 35.2512381,
+        "p95_ms": 35.268083,
+        "std_ms": 0.06990963244104817
+      },
+      "output_transform_ms": {
+        "max_ms": 0.551118,
+        "mean_ms": 0.45709208,
+        "median_ms": 0.4800085,
+        "min_ms": 0.265205,
+        "n": 50,
+        "p90_ms": 0.5294941000000001,
+        "p95_ms": 0.5427630999999999,
+        "std_ms": 0.07141031328329234
+      }
+    },
+    "exact_sampler_compile_first_call_ms": 35.244836,
+    "public_policy_infer_end_to_end_ms": {
+      "max_ms": 46.805368,
+      "mean_ms": 46.13917098,
+      "median_ms": 46.198094999999995,
+      "min_ms": 44.996628,
+      "n": 50,
+      "p90_ms": 46.6196926,
+      "p95_ms": 46.72414005,
+      "std_ms": 0.42351881907816846
+    },
+    "result_shapes": [
+      [
+        30,
+        14
+      ]
+    ]
+  }
+}

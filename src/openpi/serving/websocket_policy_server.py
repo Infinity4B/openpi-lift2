@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import http
 import logging
 import time
@@ -42,6 +43,8 @@ class WebsocketPolicyServer:
         self._fix_state_mask = fix_state_mask
         self._fix_state_values = fix_state_values
         self._step_count = 0
+        self._total_infer_time_ms = 0.0
+        self._recent_infer_times_ms = collections.deque(maxlen=50)
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -119,6 +122,12 @@ class WebsocketPolicyServer:
 
                 response_ready_time = time.monotonic()
                 response_ready_wall_ns = time.time_ns()
+                infer_ms = infer_time * 1000
+                self._total_infer_time_ms += infer_ms
+                self._recent_infer_times_ms.append(infer_ms)
+                avg_infer_ms = self._total_infer_time_ms / (self._step_count + 1)
+                recent_avg_infer_ms = sum(self._recent_infer_times_ms) / len(self._recent_infer_times_ms)
+
                 timing = {
                     "request_id": request_id,
                     "server_request_received_wall_ns": request_received_wall_ns,
@@ -126,10 +135,13 @@ class WebsocketPolicyServer:
                     "server_model_end_wall_ns": infer_end_wall_ns,
                     "server_response_ready_wall_ns": response_ready_wall_ns,
                     "server_preprocess_ms": (infer_start_time - request_received_time) * 1000,
-                    "server_model_forward_ms": infer_time * 1000,
+                    "server_model_forward_ms": infer_ms,
                     "server_postprocess_ms": (response_ready_time - infer_end_time) * 1000,
                     "server_total_ms": (response_ready_time - request_received_time) * 1000,
-                    "infer_ms": infer_time * 1000,
+                    "infer_ms": infer_ms,
+                    "avg_infer_ms": avg_infer_ms,
+                    "recent_avg_infer_ms": recent_avg_infer_ms,
+                    "infer_count": self._step_count + 1,
                 }
                 if prev_total_time is not None:
                     # We can only record the last total time since we also want to include the send time.

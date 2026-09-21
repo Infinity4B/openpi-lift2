@@ -45,9 +45,9 @@ def test_policy_server(host, port):
     left_wrist_img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
     right_wrist_img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
 
-    # Use training mean for left arm
-    left_qpos = np.array([-0.0008, 0.0032, 0.0055, -0.0037, -0.0025, 0.0005, 4.8946], dtype=np.float32)
-    right_qpos = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.9], dtype=np.float32)
+    # State grippers follow the robot client contract: normalized to [0, 1].
+    left_qpos = np.array([-0.0008, 0.0032, 0.0055, -0.0037, -0.0025, 0.0005, 4.8946 / 5.0], dtype=np.float32)
+    right_qpos = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.9 / 5.0], dtype=np.float32)
     state = np.concatenate([left_qpos, right_qpos], axis=0)
 
     observation = {
@@ -74,9 +74,21 @@ def test_policy_server(host, port):
         result = client.infer(observation)
         latency_ms = (time.perf_counter() - t0) * 1000
 
-        action_chunk = result["actions"]
-        print(f"   ✓ Inference successful")
-        print(f"     - Latency: {latency_ms:.1f} ms")
+        action_chunk = np.asarray(result["actions"])
+        if action_chunk.shape != (30, 14):
+            raise ValueError(f"Expected discrete LIFT2 action shape (30, 14), got {action_chunk.shape}")
+        if not np.all(np.isfinite(action_chunk)):
+            raise ValueError("Inference returned NaN/Inf actions")
+        print("   ✓ Inference successful")
+        print(f"     - Client RTT Latency: {latency_ms:.1f} ms")
+        if "server_timing" in result:
+            st = result["server_timing"]
+            s_infer = st.get("infer_ms", 0.0)
+            s_avg = st.get("avg_infer_ms", s_infer)
+            s_tot = st.get("server_total_ms", s_infer)
+            net_ms = max(0.0, latency_ms - s_tot)
+            print(f"     - Server Inference: {s_infer:.1f} ms (server avg: {s_avg:.1f} ms, count: {st.get('infer_count', 1)})")
+            print(f"     - Network / Transfer: {net_ms:.1f} ms")
         print(f"     - Action chunk shape: {action_chunk.shape}")
         print(f"     - First action: {action_chunk[0]}")
         print(f"     - Left gripper: {action_chunk[0][6]:.3f}")
@@ -89,16 +101,34 @@ def test_policy_server(host, port):
     # Multiple inference test
     print("\n4. Testing multiple inferences...")
     latencies = []
+    server_latencies = []
     for i in range(5):
         t0 = time.perf_counter()
         result = client.infer(observation)
         latency_ms = (time.perf_counter() - t0) * 1000
         latencies.append(latency_ms)
-        print(f"   Inference {i+1}: {latency_ms:.1f} ms")
+
+        server_str = ""
+        if "server_timing" in result:
+            st = result["server_timing"]
+            s_infer = st.get("infer_ms", 0.0)
+            server_latencies.append(s_infer)
+            s_avg = st.get("avg_infer_ms", s_infer)
+            s_tot = st.get("server_total_ms", s_infer)
+            net_ms = max(0.0, latency_ms - s_tot)
+            server_str = f" | Server infer: {s_infer:.1f} ms (server avg: {s_avg:.1f} ms) | Net: {net_ms:.1f} ms"
+
+        print(f"   Inference {i+1}: Client RTT {latency_ms:.1f} ms{server_str}")
 
     avg_latency = np.mean(latencies)
     std_latency = np.std(latencies)
-    print(f"\n   Average latency: {avg_latency:.1f} ± {std_latency:.1f} ms")
+    print(f"\n   Average Client RTT: {avg_latency:.1f} ± {std_latency:.1f} ms")
+    if server_latencies:
+        avg_server = np.mean(server_latencies)
+        std_server = np.std(server_latencies)
+        avg_net = max(0.0, avg_latency - avg_server)
+        print(f"   Average Server Infer: {avg_server:.1f} ± {std_server:.1f} ms")
+        print(f"   Average Network Overhead: {avg_net:.1f} ms")
 
     # Summary
     print("\n" + "="*60)
@@ -106,7 +136,10 @@ def test_policy_server(host, port):
     print("="*60)
     print("✓ Policy server connection: OK")
     print("✓ Inference functionality: OK")
-    print(f"✓ Average latency: {avg_latency:.1f} ms")
+    print(f"✓ Average Client RTT: {avg_latency:.1f} ms")
+    if server_latencies:
+        print(f"✓ Average Server Inference: {np.mean(server_latencies):.1f} ms")
+        print(f"ℹ Network/Transfer Overhead: {max(0.0, avg_latency - np.mean(server_latencies)):.1f} ms")
 
     if avg_latency < 100:
         print("\n✓ Latency is excellent (< 100ms)")

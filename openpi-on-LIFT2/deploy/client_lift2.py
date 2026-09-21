@@ -1029,6 +1029,7 @@ class OpenPIClientModel:
         self.rtc_pred_eef = None
         self.latest_executor_action_chunk = None
         self.infer_times_ms = []
+        self.server_infer_times_ms = []
         if self.client_mode == 'rtc':
             self.client.reset()
         return None
@@ -1040,10 +1041,17 @@ class OpenPIClientModel:
             return
 
         average_infer_ms = float(np.mean(self.infer_times_ms))
-        rospy.loginfo(
-            f"[Inference Summary] Average infer time: {average_infer_ms:.1f} ms "
+        msg = (
+            f"[Inference Summary] Average Client RTT: {average_infer_ms:.1f} ms "
             f"over {len(self.infer_times_ms)} calls"
         )
+        if getattr(self, "server_infer_times_ms", None):
+            avg_server = float(np.mean(self.server_infer_times_ms))
+            avg_net = max(0.0, average_infer_ms - avg_server)
+            msg += (
+                f" | Server infer: {avg_server:.1f} ms | Network/Transfer: {avg_net:.1f} ms"
+            )
+        rospy.loginfo(msg)
 
     def pop_latest_executor_action_chunk(self):
         action_chunk = self.latest_executor_action_chunk
@@ -1156,6 +1164,11 @@ class OpenPIClientModel:
         delay_steps = self.client.get_estimated_delay_steps()
         args.rtc_compare_last_delay_steps = delay_steps
         server_timing = get_server_timing_metadata(result)
+        server_infer_ms = server_timing.get("infer_ms") if server_timing else None
+        server_avg_ms = server_timing.get("avg_infer_ms") if server_timing else None
+        server_total_ms = server_timing.get("server_total_ms") if server_timing else None
+        if server_infer_ms is not None:
+            self.server_infer_times_ms.append(server_infer_ms)
         metadata = {
             'request_type': 'rtc_control_tick_action_fetch',
             'measurement_scope': 'client_observed_action_fetch_latency',
@@ -1184,7 +1197,17 @@ class OpenPIClientModel:
         self.rtc_pred_eef = action_predict.copy()
 
         if args.log_latency or args.verbose:
-            rospy.loginfo(f"[RTC Latency] control tick: {latency_ms:.1f} ms, estimated delay={delay_steps} steps")
+            if server_infer_ms is not None:
+                net_ms = max(
+                    0.0,
+                    latency_ms - (server_total_ms if server_total_ms is not None else server_infer_ms),
+                )
+                rospy.loginfo(
+                    f"[RTC Latency] Client RTT: {latency_ms:.1f} ms | Server infer: {server_infer_ms:.1f} ms "
+                    f"(avg: {server_avg_ms:.1f} ms) | Net: {net_ms:.1f} ms, estimated delay={delay_steps} steps"
+                )
+            else:
+                rospy.loginfo(f"[RTC Latency] control tick: {latency_ms:.1f} ms, estimated delay={delay_steps} steps")
 
         if args.verbose:
             rospy.loginfo(f"[RTC] Delta xyz: L={delta_action[:3]}, R={delta_action[7:10]}")
@@ -1218,6 +1241,11 @@ class OpenPIClientModel:
             latency_ms = (t1 - t0) * 1000
             self.infer_times_ms.append(latency_ms)
             server_timing = get_server_timing_metadata(result)
+            server_infer_ms = server_timing.get("infer_ms") if server_timing else None
+            server_avg_ms = server_timing.get("avg_infer_ms") if server_timing else None
+            server_total_ms = server_timing.get("server_total_ms") if server_timing else None
+            if server_infer_ms is not None:
+                self.server_infer_times_ms.append(server_infer_ms)
             metadata = {
                 'request_type': 'non_rtc_chunk_action_fetch',
                 'measurement_scope': 'client_observed_action_fetch_latency',
@@ -1237,7 +1265,17 @@ class OpenPIClientModel:
             )
 
             if args.log_latency or args.verbose:
-                rospy.loginfo(f"[Latency] single inference: {latency_ms:.1f} ms")
+                if server_infer_ms is not None:
+                    net_ms = max(
+                        0.0,
+                        latency_ms - (server_total_ms if server_total_ms is not None else server_infer_ms),
+                    )
+                    rospy.loginfo(
+                        f"[Latency] Client RTT: {latency_ms:.1f} ms | Server infer: {server_infer_ms:.1f} ms "
+                        f"(avg: {server_avg_ms:.1f} ms) | Net: {net_ms:.1f} ms"
+                    )
+                else:
+                    rospy.loginfo(f"[Latency] single inference: {latency_ms:.1f} ms")
 
             action_chunk = result["actions"]  # Shape: (action_horizon, 14)
             # action_chunk contains delta actions
