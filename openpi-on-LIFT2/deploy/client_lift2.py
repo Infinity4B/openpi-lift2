@@ -1028,9 +1028,22 @@ class OpenPIClientModel:
         self.executed_count = 0
         self.rtc_pred_eef = None
         self.latest_executor_action_chunk = None
+        self.infer_times_ms = []
         if self.client_mode == 'rtc':
             self.client.reset()
         return None
+
+    def report_inference_summary(self):
+        """Report the average client-side infer round-trip for this execution."""
+        if not self.infer_times_ms:
+            rospy.loginfo("[Inference Summary] No infer calls recorded")
+            return
+
+        average_infer_ms = float(np.mean(self.infer_times_ms))
+        rospy.loginfo(
+            f"[Inference Summary] Average infer time: {average_infer_ms:.1f} ms "
+            f"over {len(self.infer_times_ms)} calls"
+        )
 
     def pop_latest_executor_action_chunk(self):
         action_chunk = self.latest_executor_action_chunk
@@ -1139,6 +1152,7 @@ class OpenPIClientModel:
         t1 = time.perf_counter()
         t1_wall_ns = time.time_ns()
         latency_ms = (t1 - t0) * 1000
+        self.infer_times_ms.append(latency_ms)
         delay_steps = self.client.get_estimated_delay_steps()
         args.rtc_compare_last_delay_steps = delay_steps
         server_timing = get_server_timing_metadata(result)
@@ -1202,6 +1216,7 @@ class OpenPIClientModel:
             t1 = time.perf_counter()
             t1_wall_ns = time.time_ns()
             latency_ms = (t1 - t0) * 1000
+            self.infer_times_ms.append(latency_ms)
             server_timing = get_server_timing_metadata(result)
             metadata = {
                 'request_type': 'non_rtc_chunk_action_fetch',
@@ -1575,6 +1590,7 @@ def model_inference(args, config, ros_operator):
         rospy.loginfo("Inference interrupted by user")
         return interrupted
     finally:
+        policy.report_inference_summary()
         executor_stopped = True
         if inference_executor is not None:
             normal_completion = not interrupted and not rospy.is_shutdown() and sys.exc_info()[0] is None
